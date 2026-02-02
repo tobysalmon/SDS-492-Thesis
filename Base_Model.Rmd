@@ -8,7 +8,297 @@ date: "2026-02-02"
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-```{r}
+## Load Libraries
 
+```{r libraries, message=FALSE, warning=FALSE}
+library(rjags)
+library(tidyverse)
+library(coda)
+library(tidycensus)
+```
+
+## Load Data
+
+```{r load-data, message=FALSE}
+# Load respiratory data from GitHub
+data <- read_csv("https://raw.githubusercontent.com/PopHIVE/Ingest/main/data/respnet/standard/data.csv.gz")
+
+# Check the structure
+glimpse(data)
+names(data)
+```
+
+## Population Estimates
+
+```{r population-estimates, message=FALSE}
+# Get 2023-2024 from Census API
+ny_pop_api <- get_estimates(
+  geography = "state",
+  state = "36",
+  product = "population",
+  year = 2024,
+  time_series = TRUE
+) |>
+  filter(variable == "POPESTIMATE", year %in% c(2023, 2024)) |>
+  arrange(year) |>
+  pull(value)
+
+# Create full population estimates tibble
+ny_pop_estimates <- tibble(
+  year = 2018:2026,
+  population = c(
+    # New York State DOH estimates
+    19542209, # 2018
+    19453561, # 2019
+    19336776, # 2020
+    19857492, # 2021
+    19673200, # 2022
+    # From Census API
+    ny_pop_api[1], # 2023
+    ny_pop_api[2], # 2024
+    # From Census website
+    20002427, # 2025
+    20002427  # 2026 (using 2025 estimate)
+  )
+)
+
+ny_pop_estimates
+```
+
+## Prepare Data for JAGS
+
+```{r prepare-data}
+# Filter to New York and prepare the data
+# Adjust column names based on your actual data structure
+data_ny <- data %>%
+  filter(geo_value == "ny") %>%
+  mutate(year = year(time)) %>%
+  left_join(ny_pop_estimates, by = "year")
+
+# Check what disease/signal columns are available
+data_ny %>%
+  select(time, signal, value) %>%
+  distinct(signal)
+
+# Pivot to wide format with one column per disease
+data_wide <- data_ny %>%
+  select(time, signal, value, population) %>%
+  pivot_wider(names_from = signal, values_from = value) %>%
+  arrange(time) %>%
+  mutate(year = year(time)) %>%
+  left_join(ny_pop_estimates, by = "year", suffix = c("", "_pop"))
+
+# Check column names and adjust as needed
+names(data_wide)
+```
+
+```{r calculate-counts}
+# Calculate counts from rates (adjust column names as needed)
+# The column names depend on your data - common names might be:
+# "flu", "covid", "rsv" or "influenza", "covid-19", etc.
+
+# Example - adjust these column names based on what you see above:
+data_counts <- data_wide %>%
+  mutate(
+    # If rates are per 100,000, convert to counts
+    flu_count = round(flu * population / 100000),
+    rsv_count = round(rsv * population / 100000),
+    covid_count = round(covid * population / 100000)
+  ) %>%
+  # Remove any rows with NA
+
+  drop_na(flu_count, rsv_count, covid_count)
+
+# View the prepared data
+head(data_counts)
+summary(data_counts)
+```
+
+## JAGS Model
+
+```{r jags-model}
+model_string <- "
+model {
+  # Likelihood - observed counts
+  for(i in 1:tmax) {
+    flu[i] ~ dpois(lambda1[i])
+    rsv[i] ~ dpois(lambda2[i])
+    covid[i] ~ dpois(lambda3[i])
+  }
+
+  # Log-linear model for rates
+  for(i in 1:tmax) {
+    lambda1[i] <- exp(phi[i,1])
+    lambda2[i] <- exp(phi[i,2])
+    lambda3[i] <- exp(phi[i,3])
+  }
+
+  # Priors - AR(1) process for each disease
+  for(k in 1:3) {
+    mu0[k] ~ dnorm(0, 1e-4)
+    prec.phi[k] ~ dgamma(0.01, 0.01)
+    rho1[k] ~ dunif(0, 1)
+
+    # First time point - stationary distribution
+    phi[1,k] ~ dnorm(mu0[k], prec.phi[k] / (1 - pow(rho1[k], 2)))
+
+    # AR(1) evolution for subsequent time points
+    for(i in 2:tmax) {
+      phi[i,k] ~ dnorm(mu0[k] + rho1[k] * (phi[i-1,k] - mu0[k]), prec.phi[k])
+    }
+  }
+}
+"
+
+# Write model to file
+writeLines(model_string, "base_model.jags")
+```
+
+## Prepare JAGS Data
+
+```{r jags-data}
+# Prepare data list for JAGS
+jags_data <- list(
+  flu = data_counts$flu_count,
+  rsv = data_counts$rsv_count,
+  covid = data_counts$covid_count,
+  tmax = nrow(data_counts)
+)
+
+# Check the data
+str(jags_data)
+```
+
+## Run JAGS Model
+
+```{r run-jags, message=FALSE, warning=FALSE}
+# Parameters to monitor
+params <- c("mu0", "rho1", "prec.phi", "lambda1", "lambda2", "lambda3", "phi")
+
+# Initialize the model
+jags_model <- jags.model(
+  file = "base_model.jags",
+  data = jags_data,
+  n.chains = 3,
+  n.adapt = 1000
+)
+
+# Burn-in
+update(jags_model, n.iter = 5000)
+
+# Sample from posterior
+samples <- coda.samples(
+  model = jags_model,
+  variable.names = params,
+  n.iter = 10000,
+  thin = 5
+)
+```
+
+## Model Diagnostics
+
+```{r diagnostics}
+# Summary of key parameters
+summary(samples[, c("mu0[1]", "mu0[2]", "mu0[3]",
+                    "rho1[1]", "rho1[2]", "rho1[3]")])
+
+# Trace plots for AR(1) parameters
+plot(samples[, c("rho1[1]", "rho1[2]", "rho1[3]")])
+
+# Gelman-Rubin diagnostic (should be close to 1)
+gelman.diag(samples[, c("mu0[1]", "mu0[2]", "mu0[3]",
+                        "rho1[1]", "rho1[2]", "rho1[3]")])
+```
+
+## Extract Fitted Values
+
+```{r fitted-values}
+# Combine chains
+samples_combined <- do.call(rbind, samples)
+
+# Extract lambda (fitted rates) for each disease
+lambda1_cols <- grep("^lambda1\\[", colnames(samples_combined))
+lambda2_cols <- grep("^lambda2\\[", colnames(samples_combined))
+lambda3_cols <- grep("^lambda3\\[", colnames(samples_combined))
+
+# Posterior means
+fitted_flu <- colMeans(samples_combined[, lambda1_cols])
+fitted_rsv <- colMeans(samples_combined[, lambda2_cols])
+fitted_covid <- colMeans(samples_combined[, lambda3_cols])
+
+# Posterior credible intervals (95%)
+fitted_flu_lower <- apply(samples_combined[, lambda1_cols], 2, quantile, 0.025)
+fitted_flu_upper <- apply(samples_combined[, lambda1_cols], 2, quantile, 0.975)
+
+fitted_rsv_lower <- apply(samples_combined[, lambda2_cols], 2, quantile, 0.025)
+fitted_rsv_upper <- apply(samples_combined[, lambda2_cols], 2, quantile, 0.975)
+
+fitted_covid_lower <- apply(samples_combined[, lambda3_cols], 2, quantile, 0.025)
+fitted_covid_upper <- apply(samples_combined[, lambda3_cols], 2, quantile, 0.975)
+
+# Create results dataframe
+results <- data_counts %>%
+  mutate(
+    fitted_flu = fitted_flu,
+    fitted_flu_lower = fitted_flu_lower,
+    fitted_flu_upper = fitted_flu_upper,
+    fitted_rsv = fitted_rsv,
+    fitted_rsv_lower = fitted_rsv_lower,
+    fitted_rsv_upper = fitted_rsv_upper,
+    fitted_covid = fitted_covid,
+    fitted_covid_lower = fitted_covid_lower,
+    fitted_covid_upper = fitted_covid_upper
+  )
+```
+
+## Visualization
+
+```{r plots, fig.width=10, fig.height=8}
+# Flu
+p1 <- ggplot(results, aes(x = time)) +
+  geom_ribbon(aes(ymin = fitted_flu_lower, ymax = fitted_flu_upper),
+              fill = "blue", alpha = 0.2) +
+  geom_line(aes(y = fitted_flu), color = "blue", linewidth = 1) +
+  geom_point(aes(y = flu_count), alpha = 0.5, size = 1) +
+  labs(title = "Flu: Observed vs Fitted", y = "Count", x = "Time") +
+  theme_minimal()
+
+# RSV
+p2 <- ggplot(results, aes(x = time)) +
+  geom_ribbon(aes(ymin = fitted_rsv_lower, ymax = fitted_rsv_upper),
+              fill = "green", alpha = 0.2) +
+  geom_line(aes(y = fitted_rsv), color = "darkgreen", linewidth = 1) +
+  geom_point(aes(y = rsv_count), alpha = 0.5, size = 1) +
+  labs(title = "RSV: Observed vs Fitted", y = "Count", x = "Time") +
+  theme_minimal()
+
+# COVID
+p3 <- ggplot(results, aes(x = time)) +
+  geom_ribbon(aes(ymin = fitted_covid_lower, ymax = fitted_covid_upper),
+              fill = "red", alpha = 0.2) +
+  geom_line(aes(y = fitted_covid), color = "darkred", linewidth = 1) +
+  geom_point(aes(y = covid_count), alpha = 0.5, size = 1) +
+  labs(title = "COVID: Observed vs Fitted", y = "Count", x = "Time") +
+  theme_minimal()
+
+# Display plots
+library(patchwork)
+p1 / p2 / p3
+```
+
+## Model Summary
+
+```{r summary}
+# AR(1) parameters for each disease
+cat("=== AR(1) Autocorrelation Parameters (rho) ===\n")
+cat("Flu:  ", mean(samples_combined[, "rho1[1]"]), "\n")
+cat("RSV:  ", mean(samples_combined[, "rho1[2]"]), "\n")
+cat("COVID:", mean(samples_combined[, "rho1[3]"]), "\n")
+
+# Mean levels
+cat("\n=== Mean Log-Rate Parameters (mu0) ===\n")
+cat("Flu:  ", mean(samples_combined[, "mu0[1]"]), "\n")
+cat("RSV:  ", mean(samples_combined[, "mu0[2]"]), "\n")
+cat("COVID:", mean(samples_combined[, "mu0[3]"]), "\n")
 ```
 
