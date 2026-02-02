@@ -9,6 +9,58 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ```{r}
+library(rjags)
+library(tidyverse)
+library(tidycensus)
+```
+
+```{r}
+census_api_key("81e4817f989c60bf268764565acf7fb7fbe0e2cf", install = TRUE)
+```
+
+## Load in the Data
+```{r}
+data <- read_csv("https://raw.githubusercontent.com/PopHIVE/Ingest/main/data/respnet/standard/data.csv.gz")
+
+# filtering the data to New York state and using "total" as the age demographic
+
+data <- data %>%
+  filter(geography == "36", age == "Total")
+
+ny_pop <- get_estimates(
+  geography = "state",
+  state = "36",
+  product = "population",
+  year = 2024,  # Most recent available
+  time_series = TRUE
+) |>
+  filter(variable == "POPESTIMATE", year %in% c(2023,2024)) %>%
+  arrange(year) %>%
+  pull(value)
+
+ny_pop_estimates <- tibble(
+  year = 2018:2026,
+  population = c(
+    # New York State DOH estimates
+    19542209, #2018
+    19453561, #2019
+    19336776, #2020
+    19857492, #2021
+    19673200, #2022
+    
+    # from census API
+    ny_pop[1],   #2023 
+    ny_pop[2],  #2024
+    
+    # From census website -- not included in the API
+    20002427, #2025
+    
+    # using 2025 estimate for 2026
+    20002427 #2026
+  )
+)
+
+
 
 ```
 
