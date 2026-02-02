@@ -60,7 +60,18 @@ ny_pop_estimates <- tibble(
   )
 )
 
+```
 
+```{r}
+data_with_pop <- data %>%
+  mutate(year = year(time)) %>%
+  left_join(ny_pop_estimates, by = "year")
 
+data_with_pop <- data_with_pop %>%
+  mutate(
+    covid_count = round(rate_covid * population / 100000),
+    flu_count = round(rate_flu * population / 100000),
+    rsv_count = round(rate_rsv * population / 100000)
+  )
 ```
 
