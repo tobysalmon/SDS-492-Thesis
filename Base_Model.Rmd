@@ -136,7 +136,7 @@ writeLines(model_string, "base_model.jags")
  
 ```{r jags-data}
 # Number of weeks to hold out for evaluation
-n_holdout <- 2  # Hold out the last 2 weeks
+n_holdout <- 1  
  
 # Define training and total periods
 tmax <- nrow(data_with_pop)
@@ -177,17 +177,22 @@ jags_model <- jags.model(
   file = "base_model.jags",
   data = jags_data,
   n.chains = 3,
-  n.adapt = 1000
+  n.adapt = 1000,
+  inits = list(
+    list(".RNG.seed" = 123, ".RNG.name" = "base::Wichmann-Hill"),
+    list(".RNG.seed" = 456, ".RNG.name" = "base::Wichmann-Hill"),
+    list(".RNG.seed" = 789, ".RNG.name" = "base::Wichmann-Hill")
+  )
 )
  
 # Burn-in
-update(jags_model, n.iter = 5000)  # Was 5000
+update(jags_model, n.iter = 10000)  
 
 samples <- coda.samples(
   model = jags_model,
   variable.names = params,
-  n.iter = 10000,  # Was 10000
-  thin = 5        # Was 5
+  n.iter = 20000,  
+  thin = 10      
 )
 ```
  
@@ -209,7 +214,7 @@ gelman.diag(samples[, c("mu0[1]", "mu0[2]", "mu0[3]",
  
 ## Extract Predictions and Evaluate
  
-```{r extract-predictions}
+```{r extract-predictions, warning=FALSE}
 # Combine chains
 samples_combined <- do.call(rbind, samples)
  
