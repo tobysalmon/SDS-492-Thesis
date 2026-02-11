@@ -239,7 +239,16 @@ summary(samples[, c("mu0[1]", "mu0[2]", "mu0[3]", "mu0[4]",
                     "rho1[1]", "rho1[2]", "rho1[3]", "rho1[4]")])
 
 # Trace plots for AR(1) parameters
-plot(samples[, c("rho1[1]", "rho1[2]", "rho1[3]", "rho1[4]")])
+plot(samples[, "rho1[1]"])
+plot(samples[, "rho1[2]"])
+plot(samples[, "rho1[3]"])
+plot(samples[, "rho1[4]"])
+
+plot(samples[, "mu0[1]"])
+plot(samples[, "mu0[2]"])
+plot(samples[, "mu0[3]"])
+plot(samples[, "mu0[4]"])
+
 
 # Gelman-Rubin diagnostic (should be close to 1)
 gelman.diag(samples[, c("mu0[1]", "mu0[2]", "mu0[3]", "mu0[4]",

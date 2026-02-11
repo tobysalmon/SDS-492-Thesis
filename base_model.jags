@@ -1,27 +1,15 @@
 
 model {
-  # TRAINING PERIOD: Likelihood for observed data
-  # Flu, RSV, and ILI use full time series
-  for(i in 1:t_train) {
+  # Likelihood for all time points
+  # NA values will be automatically predicted by JAGS
+  for(i in 1:tmax) {
     flu[i] ~ dpois(lambda1[i])
     rsv[i] ~ dpois(lambda2[i])
+    covid[i] ~ dpois(lambda3[i])
     ili[i] ~ dpois(lambda4[i])
   }
 
-  # COVID only from t_start_covid onwards
-  for(i in t_start_covid:t_train) {
-    covid[i] ~ dpois(lambda3[i])
-  }
-
-  # EVALUATION PERIOD: Generate predictions
-  for(i in (t_train+1):tmax) {
-    flu_pred[i] ~ dpois(lambda1[i])
-    rsv_pred[i] ~ dpois(lambda2[i])
-    covid_pred[i] ~ dpois(lambda3[i])
-    ili_pred[i] ~ dpois(lambda4[i])
-  }
-
-  # Log-linear model for rates (all time points)
+  # Log-linear model for rates
   for(i in 1:tmax) {
     lambda1[i] <- exp(phi[i,1])
     lambda2[i] <- exp(phi[i,2])
@@ -35,8 +23,11 @@ model {
     prec.phi[k] ~ dgamma(0.01, 0.01)
     rho1[k] ~ dunif(0, 1)
 
-    phi[1,k] ~ dnorm(mu0[k], prec.phi[k] * (1 - pow(rho1[k], 2))) ## <-- QUESTION
+    # First time point - stationary distribution
+    # Stationary precision = prec.phi * (1 - rho^2)
+    phi[1,k] ~ dnorm(mu0[k], prec.phi[k] * (1 - pow(rho1[k], 2)))
 
+    # AR(1) evolution for subsequent time points
     for(i in 2:tmax) {
       phi[i,k] ~ dnorm(mu0[k] + rho1[k] * (phi[i-1,k] - mu0[k]), prec.phi[k])
     }
