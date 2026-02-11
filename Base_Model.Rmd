@@ -13,6 +13,7 @@ library(rjags)
 library(tidyverse)
 library(coda)
 library(tidycensus)
+library(readxl)
 ```
 
 ```{r}
@@ -24,48 +25,58 @@ library(tidycensus)
 data <- read_csv("https://raw.githubusercontent.com/PopHIVE/Ingest/main/data/respnet/standard/data.csv.gz")
 ili_data <- read_csv("https://raw.githubusercontent.com/PopHIVE/Ingest/main/data/delphi_ili_fluview/standard/data.csv.gz")
 
-# filtering the data to New York state and using "total" as the age demographic
-# New York State FIPS code is 36
+
+# filtering the data to state and using "total" as the age demographic
+
+fips <- "26" # Michigan
 
 data <- data %>%
-  filter(geography == "36", age == "Total")
+  filter(geography == fips , age == "Total")
 
-# Filter ILI data for New York state
+# Filter ILI data for state
 ili_data <- ili_data %>%
-  filter(geography == "36") %>%
+  filter(geography == fips) %>%
   select(time, ili_count = delphi_fluview_num_ili) %>%
   arrange(time)
 
-ny_pop <- get_estimates(
+state_pre <- get_estimates(
   geography = "state",
-  state = "36",
+  state = fips,
   product = "population",
-  year = 2024,  # Most recent available
+  vintage = 2019,
   time_series = TRUE
 ) |>
-  filter(variable == "POPESTIMATE", year %in% c(2023,2024)) %>%
+  filter(variable == "POP") |>
+  mutate(year = 2009 + DATE) |>
+  filter(year %in% c(2018, 2019)) |>
+  arrange(year)|>
+  pull(value)
+
+state_pop <- get_estimates(
+  geography = "state",
+  state = fips,
+  product = "population",
+  vintage = 2025,  # Most recent available
+  time_series = TRUE
+) |>
+  filter(variable == "POPESTIMATE", year %in% c(2020:2025)) %>%
   arrange(year) %>%
   pull(value)
 
-ny_pop_estimates <- tibble(
+
+state_pop_estimates <- tibble(
   year = 2018:2026,
   population = c(
-    # New York State DOH estimates
-    19542209, #2018
-    19453561, #2019
-    19336776, #2020
-    19857492, #2021
-    19673200, #2022
-    
-    # from census API
-    ny_pop[1],   #2023 
-    ny_pop[2],  #2024
-    
-    # From census website -- not included in the API
-    20002427, #2025
-    
-    # using 2025 estimate for 2026
-    20002427 #2026
+    # State census population estimates
+    state_pre[1], #2018
+    state_pre[2], #2019
+    state_pop[1],   #2020
+    state_pop[2],   #2021
+    state_pop[3],   #2022
+    state_pop[4],   #2023
+    state_pop[5],   #2024
+    state_pop[6],   #2025
+    state_pop[6]   #2026 - using 2025 estimate for 2026
   )
 )
 
@@ -75,7 +86,7 @@ ny_pop_estimates <- tibble(
 ```{r population_merge}
 data_with_pop <- data %>%
   mutate(year = year(time)) %>%
-  left_join(ny_pop_estimates, by = "year")
+  left_join(state_pop_estimates, by = "year")
 
 data_with_pop <- data_with_pop %>%
   mutate(
