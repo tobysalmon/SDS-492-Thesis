@@ -1,0 +1,45 @@
+
+model {
+  # TRAINING PERIOD: Likelihood for observed data
+  # Flu, RSV, and ILI use full time series
+  for(i in 1:t_train) {
+    flu[i] ~ dpois(lambda1[i])
+    rsv[i] ~ dpois(lambda2[i])
+    ili[i] ~ dpois(lambda4[i])
+  }
+
+  # COVID only from t_start_covid onwards
+  for(i in t_start_covid:t_train) {
+    covid[i] ~ dpois(lambda3[i])
+  }
+
+  # EVALUATION PERIOD: Generate predictions
+  for(i in (t_train+1):tmax) {
+    flu_pred[i] ~ dpois(lambda1[i])
+    rsv_pred[i] ~ dpois(lambda2[i])
+    covid_pred[i] ~ dpois(lambda3[i])
+    ili_pred[i] ~ dpois(lambda4[i])
+  }
+
+  # Log-linear model for rates (all time points)
+  for(i in 1:tmax) {
+    lambda1[i] <- exp(phi[i,1])
+    lambda2[i] <- exp(phi[i,2])
+    lambda3[i] <- exp(phi[i,3])
+    lambda4[i] <- exp(phi[i,4])
+  }
+
+  # Priors - AR(1) process for each disease
+  for(k in 1:4) {
+    mu0[k] ~ dnorm(0, 1e-4)
+    prec.phi[k] ~ dgamma(0.01, 0.01)
+    rho1[k] ~ dunif(0, 1)
+
+    phi[1,k] ~ dnorm(mu0[k], prec.phi[k] * (1 - pow(rho1[k], 2))) ## <-- QUESTION
+
+    for(i in 2:tmax) {
+      phi[i,k] ~ dnorm(mu0[k] + rho1[k] * (phi[i-1,k] - mu0[k]), prec.phi[k])
+    }
+  }
+}
+

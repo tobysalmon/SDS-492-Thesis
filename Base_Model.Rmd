@@ -8,148 +8,134 @@ date: "2026-02-02"
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## Load Libraries
-
-```{r libraries, message=FALSE, warning=FALSE}
+```{r}
 library(rjags)
 library(tidyverse)
 library(coda)
 library(tidycensus)
-library(HDInterval)  # For highest density intervals
-library(patchwork)
 ```
 
-## Load Data
+```{r}
+#census_api_key("81e4817f989c60bf268764565acf7fb7fbe0e2cf", install = TRUE)
+```
 
-```{r load-data, message=FALSE}
-# Load respiratory data from GitHub
+## Load in the Data
+```{r load_data}
 data <- read_csv("https://raw.githubusercontent.com/PopHIVE/Ingest/main/data/respnet/standard/data.csv.gz")
+ili_data <- read_csv("https://raw.githubusercontent.com/PopHIVE/Ingest/main/data/delphi_ili_fluview/standard/data.csv.gz")
 
-# Check the structure
-glimpse(data)
-names(data)
-```
+# filtering the data to New York state and using "total" as the age demographic
+# New York State FIPS code is 36
 
-## Population Estimates
+data <- data %>%
+  filter(geography == "36", age == "Total")
 
-```{r population-estimates, message=FALSE}
-# Get 2023-2024 from Census API
-ny_pop_api <- get_estimates(
+# Filter ILI data for New York state
+ili_data <- ili_data %>%
+  filter(geography == "36") %>%
+  select(time, ili_count = delphi_fluview_num_ili) %>%
+  arrange(time)
+
+ny_pop <- get_estimates(
   geography = "state",
   state = "36",
   product = "population",
-  year = 2024,
+  year = 2024,  # Most recent available
   time_series = TRUE
 ) |>
-  filter(variable == "POPESTIMATE", year %in% c(2023, 2024)) |>
-  arrange(year) |>
+  filter(variable == "POPESTIMATE", year %in% c(2023,2024)) %>%
+  arrange(year) %>%
   pull(value)
 
-# Create full population estimates tibble
 ny_pop_estimates <- tibble(
   year = 2018:2026,
   population = c(
     # New York State DOH estimates
-    19542209, # 2018
-    19453561, # 2019
-    19336776, # 2020
-    19857492, # 2021
-    19673200, # 2022
-    # From Census API
-    ny_pop_api[1], # 2023
-    ny_pop_api[2], # 2024
-    # From Census website
-    20002427, # 2025
-    20002427  # 2026 (using 2025 estimate)
+    19542209, #2018
+    19453561, #2019
+    19336776, #2020
+    19857492, #2021
+    19673200, #2022
+    
+    # from census API
+    ny_pop[1],   #2023 
+    ny_pop[2],  #2024
+    
+    # From census website -- not included in the API
+    20002427, #2025
+    
+    # using 2025 estimate for 2026
+    20002427 #2026
   )
 )
 
-ny_pop_estimates
 ```
 
-## Prepare Data for JAGS
-
-```{r prepare-data}
-# Filter to New York and prepare the data
-# Adjust column names based on your actual data structure
-data_ny <- data %>%
-  filter(geo_value == "ny") %>%
+## Merging Population Estimates with Data
+```{r population_merge}
+data_with_pop <- data %>%
   mutate(year = year(time)) %>%
   left_join(ny_pop_estimates, by = "year")
 
-# Check what disease/signal columns are available
-data_ny %>%
-  select(time, signal, value) %>%
-  distinct(signal)
-
-# Pivot to wide format with one column per disease
-data_wide <- data_ny %>%
-  select(time, signal, value, population) %>%
-  pivot_wider(names_from = signal, values_from = value) %>%
-  arrange(time) %>%
-  mutate(year = year(time)) %>%
-  left_join(ny_pop_estimates, by = "year", suffix = c("", "_pop"))
-
-# Check column names and adjust as needed
-names(data_wide)
-```
-
-```{r calculate-counts}
-# Calculate counts from rates (adjust column names as needed)
-# The column names depend on your data - common names might be:
-# "flu", "covid", "rsv" or "influenza", "covid-19", etc.
-
-# Example - adjust these column names based on what you see above:
-data_counts <- data_wide %>%
+data_with_pop <- data_with_pop %>%
   mutate(
-    # If rates are per 100,000, convert to counts
-    flu_count = round(flu * population / 100000),
-    rsv_count = round(rsv * population / 100000),
-    covid_count = round(covid * population / 100000)
-  ) %>%
-  # Remove any rows with NA
+    covid_count = round(rate_covid * population / 100000),
+    flu_count = round(rate_flu * population / 100000),
+    rsv_count = round(rate_rsv * population / 100000)
+  )
 
-  drop_na(flu_count, rsv_count, covid_count)
-
-# View the prepared data
-head(data_counts)
-summary(data_counts)
+# Merge ILI data with the main dataset
+data_with_pop <- data_with_pop %>%
+  left_join(ili_data, by = "time") %>%
+  mutate(ili_count = replace_na(ili_count, 0))
 ```
 
-## JAGS Model
-
-This is a baseline AR(1) nowcasting model. JAGS will automatically estimate
-values for NA observations, allowing us to evaluate predictions against
-held-out actuals.
-
+## JAGS Model with Sliding Window Evaluation
+ 
+The model has two components:
+1. **Training period (1:t_train)**: Learn parameters from observed data
+2. **Evaluation period (t_train+1:tmax)**: Predict held-out observations
+ 
 ```{r jags-model}
 model_string <- "
 model {
-  # Likelihood for all time points
-  # NA values will be automatically predicted by JAGS
-  for(i in 1:tmax) {
+  # TRAINING PERIOD: Likelihood for observed data
+  # Flu, RSV, and ILI use full time series
+  for(i in 1:t_train) {
     flu[i] ~ dpois(lambda1[i])
     rsv[i] ~ dpois(lambda2[i])
+    ili[i] ~ dpois(lambda4[i])
+  }
+
+  # COVID only from t_start_covid onwards
+  for(i in t_start_covid:t_train) {
     covid[i] ~ dpois(lambda3[i])
   }
 
-  # Log-linear model for rates
+  # EVALUATION PERIOD: Generate predictions
+  for(i in (t_train+1):tmax) {
+    flu_pred[i] ~ dpois(lambda1[i])
+    rsv_pred[i] ~ dpois(lambda2[i])
+    covid_pred[i] ~ dpois(lambda3[i])
+    ili_pred[i] ~ dpois(lambda4[i])
+  }
+
+  # Log-linear model for rates (all time points)
   for(i in 1:tmax) {
     lambda1[i] <- exp(phi[i,1])
     lambda2[i] <- exp(phi[i,2])
     lambda3[i] <- exp(phi[i,3])
+    lambda4[i] <- exp(phi[i,4])
   }
 
   # Priors - AR(1) process for each disease
-  for(k in 1:3) {
+  for(k in 1:4) {
     mu0[k] ~ dnorm(0, 1e-4)
     prec.phi[k] ~ dgamma(0.01, 0.01)
     rho1[k] ~ dunif(0, 1)
 
-    # First time point - stationary distribution
-    phi[1,k] ~ dnorm(mu0[k], prec.phi[k] / (1 - pow(rho1[k], 2)))
+    phi[1,k] ~ dnorm(mu0[k], prec.phi[k] * (1 - pow(rho1[k], 2))) ## <-- QUESTION
 
-    # AR(1) evolution for subsequent time points
     for(i in 2:tmax) {
       phi[i,k] ~ dnorm(mu0[k] + rho1[k] * (phi[i-1,k] - mu0[k]), prec.phi[k])
     }
@@ -157,354 +143,325 @@ model {
 }
 "
 
-# Write model to file
 writeLines(model_string, "base_model.jags")
+
 ```
-
+ 
 ## Prepare JAGS Data
-
+ 
 ```{r jags-data}
 # Number of weeks to hold out for evaluation
-n_holdout <- 2
+n_holdout <- 1  
+ 
+# Define training and total periods
+tmax <- nrow(data_with_pop)
+t_train <- tmax - n_holdout
 
-tmax <- nrow(data_counts)
-
-cat("Total observations:", tmax, "\n")
-cat("Training on:", tmax - n_holdout, "observations\n")
-cat("Evaluating on last:", n_holdout, "observations\n")
-
-# Store the actual values for comparison BEFORE setting to NA
-actuals_holdout <- data_counts %>%
-  tail(n_holdout) %>%
-  select(time, flu_count, rsv_count, covid_count)
-
-cat("\nHeld-out actual values:\n")
-print(actuals_holdout)
-
-# Create data vectors with NA for held-out observations
-# JAGS will automatically predict these NA values
-flu_data <- data_counts$flu_count
-rsv_data <- data_counts$rsv_count
-covid_data <- data_counts$covid_count
-
-# Set last n_holdout observations to NA
-flu_data[(tmax - n_holdout + 1):tmax] <- NA
-rsv_data[(tmax - n_holdout + 1):tmax] <- NA
-covid_data[(tmax - n_holdout + 1):tmax] <- NA
+t_start_covid <- which(data_with_pop$covid_count > 0)[1]
 
 # Prepare data list for JAGS
+# Only pass training data for flu/rsv/covid/ili
 jags_data <- list(
-  flu = flu_data,
-  rsv = rsv_data,
-  covid = covid_data,
-  tmax = tmax
+  flu = data_with_pop$flu_count[1:t_train],
+  rsv = data_with_pop$rsv_count[1:t_train],
+  covid = data_with_pop$covid_count[1:t_train],
+  ili = data_with_pop$ili_count[1:t_train],
+  t_train = t_train,
+  tmax = tmax,
+  t_start_covid = t_start_covid
 )
-
-cat("\nLast few values passed to JAGS (NA = to be predicted):\n")
-cat("Flu:", tail(jags_data$flu, 5), "\n")
-cat("RSV:", tail(jags_data$rsv, 5), "\n")
-cat("COVID:", tail(jags_data$covid, 5), "\n")
+ 
+# Store the held-out actuals for comparison
+actuals_holdout <- data_with_pop %>%
+  tail(n_holdout) %>%
+  select(time, flu_count, rsv_count, covid_count, ili_count)
+ 
+cat("\nHeld-out actual values:\n")
+print(actuals_holdout)
 ```
-
+ 
 ## Run JAGS Model
-
+ 
 ```{r run-jags, message=FALSE, warning=FALSE}
 # Parameters to monitor
-# flu, rsv, covid will include predicted values for the NA observations
-params <- c("mu0", "rho1", "prec.phi", "lambda1", "lambda2", "lambda3",
-            "flu", "rsv", "covid")
-
-# Set seeds for reproducibility
-inits <- list(
-  list(".RNG.seed" = 123, ".RNG.name" = "base::Wichmann-Hill"),
-  list(".RNG.seed" = 456, ".RNG.name" = "base::Wichmann-Hill"),
-  list(".RNG.seed" = 789, ".RNG.name" = "base::Wichmann-Hill")
-)
-
+# Include flu_pred, rsv_pred, covid_pred for the evaluation period
+params <- c("mu0", "rho1", "prec.phi", "lambda1", "lambda2", "lambda3", "lambda4",
+            "flu_pred", "rsv_pred", "covid_pred", "ili_pred")
+ 
 # Initialize the model
 jags_model <- jags.model(
   file = "base_model.jags",
   data = jags_data,
-  inits = inits,
   n.chains = 3,
-  n.adapt = 1000
+  n.adapt = 1000,
+  inits = list(
+    list(".RNG.seed" = 123, ".RNG.name" = "base::Wichmann-Hill"),
+    list(".RNG.seed" = 456, ".RNG.name" = "base::Wichmann-Hill"),
+    list(".RNG.seed" = 789, ".RNG.name" = "base::Wichmann-Hill")
+  )
 )
-
+ 
 # Burn-in
-update(jags_model, n.iter = 5000)
+update(jags_model, n.iter = 10000)  
 
-# Sample from posterior
 samples <- coda.samples(
   model = jags_model,
   variable.names = params,
-  n.iter = 10000,
-  thin = 5
+  n.iter = 20000,   
+  thin = 10      
 )
 ```
-
+ 
 ## Model Diagnostics
-
+ 
 ```{r diagnostics}
 # Summary of key parameters
-summary(samples[, c("mu0[1]", "mu0[2]", "mu0[3]",
-                    "rho1[1]", "rho1[2]", "rho1[3]")])
+summary(samples[, c("mu0[1]", "mu0[2]", "mu0[3]", "mu0[4]",
+                    "rho1[1]", "rho1[2]", "rho1[3]", "rho1[4]")])
 
 # Trace plots for AR(1) parameters
-plot(samples[, c("rho1[1]", "rho1[2]", "rho1[3]")])
+plot(samples[,"rho1[1]"])
+plot(samples[,"rho1[2]"])
+plot(samples[,"rho1[3]"])
+plot(samples[,"rho1[4]"])
+
+plot(samples[,"mu0[1]"])
+plot(samples[,"mu0[2]"])
+plot(samples[,"mu0[3]"])
+plot(samples[,"mu0[4]"])
+
+plot(samples[,"lambda1[1]"])
+
 
 # Gelman-Rubin diagnostic (should be close to 1)
-gelman.diag(samples[, c("mu0[1]", "mu0[2]", "mu0[3]",
-                        "rho1[1]", "rho1[2]", "rho1[3]")])
+gelman.diag(samples[, c("mu0[1]", "mu0[2]", "mu0[3]", "mu0[4]",
+                        "rho1[1]", "rho1[2]", "rho1[3]", "rho1[4]")])
 ```
-
+ 
+ 
 ## Extract Predictions and Evaluate
-
-```{r extract-predictions}
+ 
+```{r extract-predictions, warning=FALSE}
 # Combine chains
 samples_combined <- do.call(rbind, samples)
-
-# Extract predictions for held-out weeks (the NA observations JAGS predicted)
+ 
+# Extract predictions for held-out weeks
 eval_results <- tibble(
   week = 1:n_holdout,
   time = actuals_holdout$time,
-
-  # Actual values (what we held out)
+ 
+  # Actual values
   actual_flu = actuals_holdout$flu_count,
   actual_rsv = actuals_holdout$rsv_count,
-  actual_covid = actuals_holdout$covid_count
+  actual_covid = actuals_holdout$covid_count,
+  actual_ili = actuals_holdout$ili_count
 )
-
+ 
 # Add predictions for each held-out week
 for (h in 1:n_holdout) {
-  idx <- tmax - n_holdout + h  # Index of held-out observation
+  idx <- t_train + h
+ 
+  # Extract posterior samples for predictions
+  flu_samples <- samples_combined[, paste0("flu_pred[", idx, "]")]
+  rsv_samples <- samples_combined[, paste0("rsv_pred[", idx, "]")]
+  covid_samples <- samples_combined[, paste0("covid_pred[", idx, "]")]
+  ili_samples <- samples_combined[, paste0("ili_pred[", idx, "]")]
 
-  # Extract posterior samples for predictions (JAGS predicted these NA values)
-  flu_samples <- samples_combined[, paste0("flu[", idx, "]")]
-  rsv_samples <- samples_combined[, paste0("rsv[", idx, "]")]
-  covid_samples <- samples_combined[, paste0("covid[", idx, "]")]
+  # Calculate summary statistics
+  eval_results$pred_flu[h] <- mean(flu_samples)
+  eval_results$pred_flu_lower[h] <- quantile(flu_samples, 0.025)
+  eval_results$pred_flu_upper[h] <- quantile(flu_samples, 0.975)
+ 
+  eval_results$pred_rsv[h] <- mean(rsv_samples)
+  eval_results$pred_rsv_lower[h] <- quantile(rsv_samples, 0.025)
+  eval_results$pred_rsv_upper[h] <- quantile(rsv_samples, 0.975)
+ 
+  eval_results$pred_covid[h] <- mean(covid_samples)
+  eval_results$pred_covid_lower[h] <- quantile(covid_samples, 0.025)
+  eval_results$pred_covid_upper[h] <- quantile(covid_samples, 0.975)
 
-  # Mean estimates
-  eval_results$pred_flu_mean[h] <- mean(flu_samples)
-  eval_results$pred_rsv_mean[h] <- mean(rsv_samples)
-  eval_results$pred_covid_mean[h] <- mean(covid_samples)
-
-  # Median estimates
-  eval_results$pred_flu_median[h] <- median(flu_samples)
-  eval_results$pred_rsv_median[h] <- median(rsv_samples)
-  eval_results$pred_covid_median[h] <- median(covid_samples)
-
-  # 95% HDI (Highest Density Interval) using HDInterval package
-  flu_hdi <- hdi(flu_samples, credMass = 0.95)
-  rsv_hdi <- hdi(rsv_samples, credMass = 0.95)
-  covid_hdi <- hdi(covid_samples, credMass = 0.95)
-
-  eval_results$pred_flu_hdi_lower[h] <- flu_hdi[1]
-  eval_results$pred_flu_hdi_upper[h] <- flu_hdi[2]
-  eval_results$pred_rsv_hdi_lower[h] <- rsv_hdi[1]
-  eval_results$pred_rsv_hdi_upper[h] <- rsv_hdi[2]
-  eval_results$pred_covid_hdi_lower[h] <- covid_hdi[1]
-  eval_results$pred_covid_hdi_upper[h] <- covid_hdi[2]
+  eval_results$pred_ili[h] <- mean(ili_samples)
+  eval_results$pred_ili_lower[h] <- quantile(ili_samples, 0.025)
+  eval_results$pred_ili_upper[h] <- quantile(ili_samples, 0.975)
 }
-
-# Calculate absolute errors (using both mean and median)
+ 
+# Calculate errors and coverage
 eval_results <- eval_results %>%
   mutate(
-    # Absolute errors using mean
-    abs_error_flu_mean = abs(actual_flu - pred_flu_mean),
-    abs_error_rsv_mean = abs(actual_rsv - pred_rsv_mean),
-    abs_error_covid_mean = abs(actual_covid - pred_covid_mean),
+    error_flu = actual_flu - pred_flu,
+    error_rsv = actual_rsv - pred_rsv,
+    error_covid = actual_covid - pred_covid,
+ 
+    covered_flu = actual_flu >= pred_flu_lower & actual_flu <= pred_flu_upper,
+    covered_rsv = actual_rsv >= pred_rsv_lower & actual_rsv <= pred_rsv_upper,
+    covered_covid = actual_covid >= pred_covid_lower & actual_covid <= pred_covid_upper,
 
-    # Absolute errors using median
-    abs_error_flu_median = abs(actual_flu - pred_flu_median),
-    abs_error_rsv_median = abs(actual_rsv - pred_rsv_median),
-    abs_error_covid_median = abs(actual_covid - pred_covid_median),
-
-    # Coverage: is actual within 95% HDI?
-    covered_flu = actual_flu >= pred_flu_hdi_lower & actual_flu <= pred_flu_hdi_upper,
-    covered_rsv = actual_rsv >= pred_rsv_hdi_lower & actual_rsv <= pred_rsv_hdi_upper,
-    covered_covid = actual_covid >= pred_covid_hdi_lower & actual_covid <= pred_covid_hdi_upper
-  )
-```
-
-## Prediction Results
-
-```{r prediction-results}
-cat("=== FLU Predictions ===\n")
-eval_results %>%
-  select(time, actual_flu, pred_flu_mean, pred_flu_median,
-         pred_flu_hdi_lower, pred_flu_hdi_upper, covered_flu) %>%
-  print()
-
-cat("\n=== RSV Predictions ===\n")
-eval_results %>%
-  select(time, actual_rsv, pred_rsv_mean, pred_rsv_median,
-         pred_rsv_hdi_lower, pred_rsv_hdi_upper, covered_rsv) %>%
-  print()
-
-cat("\n=== COVID Predictions ===\n")
-eval_results %>%
-  select(time, actual_covid, pred_covid_mean, pred_covid_median,
-         pred_covid_hdi_lower, pred_covid_hdi_upper, covered_covid) %>%
-  print()
-```
-
-## Mean vs Median Comparison
-
-```{r mean-vs-median}
-cat("=== Absolute Errors: Mean vs Median Point Estimates ===\n\n")
-
-comparison <- tibble(
-  Disease = c("Flu", "RSV", "COVID"),
-  `MAE (Mean)` = c(
-    mean(eval_results$abs_error_flu_mean),
-    mean(eval_results$abs_error_rsv_mean),
-    mean(eval_results$abs_error_covid_mean)
-  ),
-  `MAE (Median)` = c(
-    mean(eval_results$abs_error_flu_median),
-    mean(eval_results$abs_error_rsv_median),
-    mean(eval_results$abs_error_covid_median)
-  )
-) %>%
-  mutate(
-    `Better Estimate` = ifelse(`MAE (Mean)` < `MAE (Median)`, "Mean", "Median")
+    error_ili = actual_ili - pred_ili,
+    covered_ili = actual_ili >= pred_ili_lower & actual_ili <= pred_ili_upper
   )
 
-print(comparison)
+cat("=== Prediction Results ===\n")
+print(eval_results %>% select(time, actual_flu, pred_flu, error_flu, covered_flu))
+print(eval_results %>% select(time, actual_rsv, pred_rsv, error_rsv, covered_rsv))
+print(eval_results %>% select(time, actual_covid, pred_covid, error_covid, covered_covid))
+print(eval_results %>% select(time, actual_ili, pred_ili, error_ili, covered_ili))
 ```
-
+ 
 ## Evaluation Metrics
-
+ 
 ```{r evaluation-metrics}
-# Calculate summary metrics using median as point estimate
+# Calculate summary metrics
 metrics <- tibble(
-  Disease = c("Flu", "RSV", "COVID"),
-  `MAE (Median)` = c(
-    mean(eval_results$abs_error_flu_median),
-    mean(eval_results$abs_error_rsv_median),
-    mean(eval_results$abs_error_covid_median)
+  disease = c("Flu", "RSV", "COVID", "ILI"),
+  MAE = c(
+    mean(abs(eval_results$error_flu)),
+    mean(abs(eval_results$error_rsv)),
+    mean(abs(eval_results$error_covid)),
+    mean(abs(eval_results$error_ili))
   ),
-  `RMSE (Median)` = c(
-    sqrt(mean(eval_results$abs_error_flu_median^2)),
-    sqrt(mean(eval_results$abs_error_rsv_median^2)),
-    sqrt(mean(eval_results$abs_error_covid_median^2))
-  ),
-  `95% HDI Coverage` = c(
+ # RMSE = c(
+ #   sqrt(mean(eval_results$error_flu^2)),
+ #   sqrt(mean(eval_results$error_rsv^2)),
+ #   sqrt(mean(eval_results$error_covid^2)),
+ #   sqrt(mean(eval_results$error_ili^2))
+ # ),
+  Coverage = c(
     mean(eval_results$covered_flu),
     mean(eval_results$covered_rsv),
-    mean(eval_results$covered_covid)
+    mean(eval_results$covered_covid),
+    mean(eval_results$covered_ili)
   )
 )
-
+ 
 cat("=== Evaluation Metrics ===\n")
-cat("MAE = Mean Absolute Error (using median as point estimate)\n")
-cat("RMSE = Root Mean Squared Error (using median as point estimate)\n")
-cat("Coverage = Proportion of actuals within 95% HDI (target: 0.95)\n\n")
+cat("MAE = Mean Absolute Error\n")
+cat("RMSE = Root Mean Squared Error\n")
+cat("Coverage = Proportion of actuals within 95% CI (target: 0.95)\n\n")
 print(metrics)
 ```
-
-## Extract Fitted Values
-
+ 
+## Extract Fitted Values for Training Period
+ 
 ```{r fitted-values}
-# Extract lambda (fitted rates) for all time points
+# Extract lambda (fitted rates) for training period
 lambda1_cols <- grep("^lambda1\\[", colnames(samples_combined))
 lambda2_cols <- grep("^lambda2\\[", colnames(samples_combined))
 lambda3_cols <- grep("^lambda3\\[", colnames(samples_combined))
+lambda4_cols <- grep("^lambda4\\[", colnames(samples_combined))
 
-# Posterior medians (all time points)
-fitted_flu <- apply(samples_combined[, lambda1_cols], 2, median)
-fitted_rsv <- apply(samples_combined[, lambda2_cols], 2, median)
-fitted_covid <- apply(samples_combined[, lambda3_cols], 2, median)
+# Posterior means (all time points)
+fitted_flu <- colMeans(samples_combined[, lambda1_cols])
+fitted_rsv <- colMeans(samples_combined[, lambda2_cols])
+fitted_covid <- colMeans(samples_combined[, lambda3_cols])
+fitted_ili <- colMeans(samples_combined[, lambda4_cols])
+ 
+# Posterior credible intervals (95%)
+fitted_flu_lower <- apply(samples_combined[, lambda1_cols], 2, quantile, 0.025)
+fitted_flu_upper <- apply(samples_combined[, lambda1_cols], 2, quantile, 0.975)
+ 
+fitted_rsv_lower <- apply(samples_combined[, lambda2_cols], 2, quantile, 0.025)
+fitted_rsv_upper <- apply(samples_combined[, lambda2_cols], 2, quantile, 0.975)
+ 
+fitted_covid_lower <- apply(samples_combined[, lambda3_cols], 2, quantile, 0.025)
+fitted_covid_upper <- apply(samples_combined[, lambda3_cols], 2, quantile, 0.975)
 
-# 95% HDI for fitted values
-fitted_flu_hdi <- apply(samples_combined[, lambda1_cols], 2, function(x) hdi(x, 0.95))
-fitted_rsv_hdi <- apply(samples_combined[, lambda2_cols], 2, function(x) hdi(x, 0.95))
-fitted_covid_hdi <- apply(samples_combined[, lambda3_cols], 2, function(x) hdi(x, 0.95))
-
+fitted_ili_lower <- apply(samples_combined[, lambda4_cols], 2, quantile, 0.025)
+fitted_ili_upper <- apply(samples_combined[, lambda4_cols], 2, quantile, 0.975)
+ 
 # Create results dataframe for full time series
-results <- data_counts %>%
+results <- data_with_pop %>%
   mutate(
     fitted_flu = fitted_flu,
-    fitted_flu_lower = fitted_flu_hdi[1, ],
-    fitted_flu_upper = fitted_flu_hdi[2, ],
+    fitted_flu_lower = fitted_flu_lower,
+    fitted_flu_upper = fitted_flu_upper,
     fitted_rsv = fitted_rsv,
-    fitted_rsv_lower = fitted_rsv_hdi[1, ],
-    fitted_rsv_upper = fitted_rsv_hdi[2, ],
+    fitted_rsv_lower = fitted_rsv_lower,
+    fitted_rsv_upper = fitted_rsv_upper,
     fitted_covid = fitted_covid,
-    fitted_covid_lower = fitted_covid_hdi[1, ],
-    fitted_covid_upper = fitted_covid_hdi[2, ],
-    period = ifelse(row_number() <= (tmax - n_holdout), "Training", "Evaluation")
+    fitted_covid_lower = fitted_covid_lower,
+    fitted_covid_upper = fitted_covid_upper,
+    fitted_ili = fitted_ili,
+    fitted_ili_lower = fitted_ili_lower,
+    fitted_ili_upper = fitted_ili_upper,
+    period = ifelse(row_number() <= t_train, "Training", "Evaluation")
   )
 ```
-
+ 
 ## Visualization
-
-```{r plots, fig.width=10, fig.height=10}
-# Train/eval split point
-split_time <- results$time[tmax - n_holdout]
-
+ 
+```{r plots, fig.width=10, fig.height=13}
+library(patchwork)
+ 
 # Flu
 p1 <- ggplot(results, aes(x = time)) +
   geom_ribbon(aes(ymin = fitted_flu_lower, ymax = fitted_flu_upper),
               fill = "blue", alpha = 0.2) +
   geom_line(aes(y = fitted_flu), color = "blue", linewidth = 1) +
   geom_point(aes(y = flu_count, shape = period), alpha = 0.7, size = 2) +
-  geom_vline(xintercept = split_time, linetype = "dashed", color = "gray40") +
+  geom_vline(xintercept = results$time[t_train], linetype = "dashed", color = "gray40") +
   scale_shape_manual(values = c("Training" = 16, "Evaluation" = 17)) +
-  labs(title = "Flu: Observed vs Fitted (Median + 95% HDI)",
+  labs(title = "Flu: Observed vs Fitted",
        subtitle = "Dashed line = train/eval split, Triangle = held-out",
        y = "Count", x = "Time") +
   theme_minimal()
-
+ 
 # RSV
 p2 <- ggplot(results, aes(x = time)) +
   geom_ribbon(aes(ymin = fitted_rsv_lower, ymax = fitted_rsv_upper),
               fill = "green", alpha = 0.2) +
   geom_line(aes(y = fitted_rsv), color = "darkgreen", linewidth = 1) +
   geom_point(aes(y = rsv_count, shape = period), alpha = 0.7, size = 2) +
-  geom_vline(xintercept = split_time, linetype = "dashed", color = "gray40") +
+  geom_vline(xintercept = results$time[t_train], linetype = "dashed", color = "gray40") +
   scale_shape_manual(values = c("Training" = 16, "Evaluation" = 17)) +
-  labs(title = "RSV: Observed vs Fitted (Median + 95% HDI)", y = "Count", x = "Time") +
+  labs(title = "RSV: Observed vs Fitted", y = "Count", x = "Time") +
   theme_minimal()
-
+ 
 # COVID
 p3 <- ggplot(results, aes(x = time)) +
   geom_ribbon(aes(ymin = fitted_covid_lower, ymax = fitted_covid_upper),
               fill = "red", alpha = 0.2) +
   geom_line(aes(y = fitted_covid), color = "darkred", linewidth = 1) +
   geom_point(aes(y = covid_count, shape = period), alpha = 0.7, size = 2) +
-  geom_vline(xintercept = split_time, linetype = "dashed", color = "gray40") +
+  geom_vline(xintercept = results$time[t_train], linetype = "dashed", color = "gray40") +
   scale_shape_manual(values = c("Training" = 16, "Evaluation" = 17)) +
-  labs(title = "COVID: Observed vs Fitted (Median + 95% HDI)", y = "Count", x = "Time") +
+  labs(title = "COVID: Observed vs Fitted", y = "Count", x = "Time") +
+  theme_minimal()
+ 
+# ILI
+p4 <- ggplot(results, aes(x = time)) +
+  geom_ribbon(aes(ymin = fitted_ili_lower, ymax = fitted_ili_upper),
+              fill = "orange", alpha = 0.2) +
+  geom_line(aes(y = fitted_ili), color = "darkorange", linewidth = 1) +
+  geom_point(aes(y = ili_count, shape = period), alpha = 0.7, size = 2) +
+  geom_vline(xintercept = results$time[t_train], linetype = "dashed", color = "gray40") +
+  scale_shape_manual(values = c("Training" = 16, "Evaluation" = 17)) +
+  labs(title = "ILI: Observed vs Fitted", y = "Count", x = "Time") +
   theme_minimal()
 
-p1 / p2 / p3
+p1 / p2 / p3 / p4
 ```
-
+ 
 ## Model Summary
-
+ 
 ```{r summary}
-# AR(1) parameters for each disease (using median)
+# AR(1) parameters for each disease
 cat("=== AR(1) Autocorrelation Parameters (rho) ===\n")
-cat("Flu:   Median =", round(median(samples_combined[, "rho1[1]"]), 3),
-    " | Mean =", round(mean(samples_combined[, "rho1[1]"]), 3), "\n")
-cat("RSV:   Median =", round(median(samples_combined[, "rho1[2]"]), 3),
-    " | Mean =", round(mean(samples_combined[, "rho1[2]"]), 3), "\n")
-cat("COVID: Median =", round(median(samples_combined[, "rho1[3]"]), 3),
-    " | Mean =", round(mean(samples_combined[, "rho1[3]"]), 3), "\n")
+cat("Flu:  ", round(mean(samples_combined[, "rho1[1]"]), 3), "\n")
+cat("RSV:  ", round(mean(samples_combined[, "rho1[2]"]), 3), "\n")
+cat("COVID:", round(mean(samples_combined[, "rho1[3]"]), 3), "\n")
+cat("ILI:  ", round(mean(samples_combined[, "rho1[4]"]), 3), "\n")
 
 # Mean levels
 cat("\n=== Mean Log-Rate Parameters (mu0) ===\n")
-cat("Flu:   Median =", round(median(samples_combined[, "mu0[1]"]), 3),
-    " | Mean =", round(mean(samples_combined[, "mu0[1]"]), 3), "\n")
-cat("RSV:   Median =", round(median(samples_combined[, "mu0[2]"]), 3),
-    " | Mean =", round(mean(samples_combined[, "mu0[2]"]), 3), "\n")
-cat("COVID: Median =", round(median(samples_combined[, "mu0[3]"]), 3),
-    " | Mean =", round(mean(samples_combined[, "mu0[3]"]), 3), "\n")
+cat("Flu:  ", round(mean(samples_combined[, "mu0[1]"]), 3), "\n")
+cat("RSV:  ", round(mean(samples_combined[, "mu0[2]"]), 3), "\n")
+cat("COVID:", round(mean(samples_combined[, "mu0[3]"]), 3), "\n")
+cat("ILI:  ", round(mean(samples_combined[, "mu0[4]"]), 3), "\n")
 
 cat("\n=== Evaluation Summary ===\n")
 cat("Held out last", n_holdout, "weeks for evaluation\n")
-cat("Using NA-based approach: JAGS automatically predicted held-out values\n\n")
 print(metrics)
 ```
+
+
 
