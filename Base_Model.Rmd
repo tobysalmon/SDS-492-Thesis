@@ -109,36 +109,47 @@ The model uses NA values for held-out observations, which JAGS will automaticall
 ```{r jags-model}
 model_string <- "
 model {
-  # Likelihood for all time points
+  # Likelihood - Negative Binomial for all time points
   # NA values will be automatically predicted by JAGS
   for(i in 1:tmax) {
-    flu[i] ~ dpois(lambda1[i])
-    rsv[i] ~ dpois(lambda2[i])
-    covid[i] ~ dpois(lambda3[i])
-    ili[i] ~ dpois(lambda4[i])
-  }
+    flu[i]   ~ dnegbin(p1[i], r[1])
+    rsv[i]   ~ dnegbin(p2[i], r[2])
+    covid[i] ~ dnegbin(p3[i], r[3])
+    ili[i]   ~ dnegbin(p4[i], r[4])
 
-  # Log-linear model for rates
-  for(i in 1:tmax) {
+    # Reparameterize: p = r/(r+lambda) so mean = lambda, var = lambda + lambda^2/r
+    p1[i] <- r[1] / (r[1] + lambda1[i])
+    p2[i] <- r[2] / (r[2] + lambda2[i])
+    p3[i] <- r[3] / (r[3] + lambda3[i])
+    p4[i] <- r[4] / (r[4] + lambda4[i])
+
     lambda1[i] <- exp(phi[i,1])
     lambda2[i] <- exp(phi[i,2])
     lambda3[i] <- exp(phi[i,3])
     lambda4[i] <- exp(phi[i,4])
   }
 
-  # Priors - AR(1) process for each disease
+  # Priors - Seasonal AR(1) process for each disease
   for(k in 1:4) {
+    r[k] ~ dunif(0, 250)
+
     mu0[k] ~ dnorm(0, 1e-4)
+    beta_sin[k] ~ dnorm(0, 0.1)
+    beta_cos[k] ~ dnorm(0, 0.1)
     prec.phi[k] ~ dgamma(0.01, 0.01)
     rho1[k] ~ dunif(0, 1)
 
-    # First time point - stationary distribution
-    # Stationary precision = prec.phi * (1 - rho^2)
-    phi[1,k] ~ dnorm(mu0[k], prec.phi[k] * (1 - pow(rho1[k], 2)))
+    # Seasonal mean at time 1
+    mu_t[1,k] <- mu0[k] + beta_sin[k] * sin52[1] + beta_cos[k] * cos52[1]
 
-    # AR(1) evolution for subsequent time points
+    # First time point - stationary distribution
+    phi[1,k] ~ dnorm(mu_t[1,k], prec.phi[k] * (1 - pow(rho1[k], 2)))
+
+    # AR(1) with seasonal mean for subsequent time points
     for(i in 2:tmax) {
-      phi[i,k] ~ dnorm(mu0[k] + rho1[k] * (phi[i-1,k] - mu0[k]), prec.phi[k])
+      mu_t[i,k] <- mu0[k] + beta_sin[k] * sin52[i] + beta_cos[k] * cos52[i]
+      phi[i,k] ~ dnorm(mu_t[i,k] + rho1[k] * (phi[i-1,k] - mu_t[i-1,k]),
+                        prec.phi[k])
     }
   }
 }
@@ -154,6 +165,11 @@ writeLines(model_string, "base_model.jags")
 n_holdout <- 2
 
 tmax <- nrow(data_with_pop)
+
+# Create harmonic vectors for seasonality (52-week cycle)
+t_vec <- 1:tmax
+sin52 <- sin(2 * pi * t_vec / 52)
+cos52 <- cos(2 * pi * t_vec / 52)
 
 cat("Total observations:", tmax, "\n")
 cat("Training on:", tmax - n_holdout, "observations\n")
@@ -186,7 +202,9 @@ jags_data <- list(
   rsv = rsv_data,
   covid = covid_data,
   ili = ili_data_vec,
-  tmax = tmax
+  tmax = tmax,
+  sin52 = sin52,
+  cos52 = cos52
 )
 
 cat("\nLast few values passed to JAGS (NA = to be predicted):\n")
@@ -201,7 +219,8 @@ cat("ILI:", tail(jags_data$ili, 5), "\n")
 ```{r run-jags, message=FALSE, warning=FALSE}
 # Parameters to monitor
 # flu, rsv, covid, ili will include predicted values for the NA observations
-params <- c("mu0", "rho1", "prec.phi", "lambda1", "lambda2", "lambda3", "lambda4",
+params <- c("mu0", "rho1", "prec.phi", "r", "beta_sin", "beta_cos",
+            "lambda1", "lambda2", "lambda3", "lambda4",
             "flu", "rsv", "covid", "ili")
 
 # Set seeds for reproducibility
@@ -236,7 +255,10 @@ samples <- coda.samples(
 ```{r diagnostics}
 # Summary of key parameters
 summary(samples[, c("mu0[1]", "mu0[2]", "mu0[3]", "mu0[4]",
-                    "rho1[1]", "rho1[2]", "rho1[3]", "rho1[4]")])
+                    "rho1[1]", "rho1[2]", "rho1[3]", "rho1[4]",
+                    "r[1]", "r[2]", "r[3]", "r[4]",
+                    "beta_sin[1]", "beta_sin[2]", "beta_sin[3]", "beta_sin[4]",
+                    "beta_cos[1]", "beta_cos[2]", "beta_cos[3]", "beta_cos[4]")])
 
 # Trace plots for AR(1) parameters
 plot(samples[, "rho1[1]"])
@@ -249,10 +271,29 @@ plot(samples[, "mu0[2]"])
 plot(samples[, "mu0[3]"])
 plot(samples[, "mu0[4]"])
 
+# Trace plots for overdispersion parameters
+plot(samples[, "r[1]"])
+plot(samples[, "r[2]"])
+plot(samples[, "r[3]"])
+plot(samples[, "r[4]"])
+
+# Trace plots for seasonal coefficients
+plot(samples[, "beta_sin[1]"])
+plot(samples[, "beta_sin[2]"])
+plot(samples[, "beta_sin[3]"])
+plot(samples[, "beta_sin[4]"])
+
+plot(samples[, "beta_cos[1]"])
+plot(samples[, "beta_cos[2]"])
+plot(samples[, "beta_cos[3]"])
+plot(samples[, "beta_cos[4]"])
 
 # Gelman-Rubin diagnostic (should be close to 1)
 gelman.diag(samples[, c("mu0[1]", "mu0[2]", "mu0[3]", "mu0[4]",
-                        "rho1[1]", "rho1[2]", "rho1[3]", "rho1[4]")])
+                        "rho1[1]", "rho1[2]", "rho1[3]", "rho1[4]",
+                        "r[1]", "r[2]", "r[3]", "r[4]",
+                        "beta_sin[1]", "beta_sin[2]", "beta_sin[3]", "beta_sin[4]",
+                        "beta_cos[1]", "beta_cos[2]", "beta_cos[3]", "beta_cos[4]")])
 ```
 
 
@@ -542,6 +583,39 @@ cat("COVID: Median =", round(median(samples_combined[, "mu0[3]"]), 3),
     " | Mean =", round(mean(samples_combined[, "mu0[3]"]), 3), "\n")
 cat("ILI:   Median =", round(median(samples_combined[, "mu0[4]"]), 3),
     " | Mean =", round(mean(samples_combined[, "mu0[4]"]), 3), "\n")
+
+# Overdispersion parameters
+cat("\n=== Overdispersion Parameters (r) ===\n")
+cat("(larger r = closer to Poisson; smaller r = more overdispersion)\n")
+cat("Flu:   Median =", round(median(samples_combined[, "r[1]"]), 3),
+    " | Mean =", round(mean(samples_combined[, "r[1]"]), 3), "\n")
+cat("RSV:   Median =", round(median(samples_combined[, "r[2]"]), 3),
+    " | Mean =", round(mean(samples_combined[, "r[2]"]), 3), "\n")
+cat("COVID: Median =", round(median(samples_combined[, "r[3]"]), 3),
+    " | Mean =", round(mean(samples_combined[, "r[3]"]), 3), "\n")
+cat("ILI:   Median =", round(median(samples_combined[, "r[4]"]), 3),
+    " | Mean =", round(mean(samples_combined[, "r[4]"]), 3), "\n")
+
+# Seasonal coefficients
+cat("\n=== Seasonal Coefficients (beta_sin) ===\n")
+cat("Flu:   Median =", round(median(samples_combined[, "beta_sin[1]"]), 3),
+    " | Mean =", round(mean(samples_combined[, "beta_sin[1]"]), 3), "\n")
+cat("RSV:   Median =", round(median(samples_combined[, "beta_sin[2]"]), 3),
+    " | Mean =", round(mean(samples_combined[, "beta_sin[2]"]), 3), "\n")
+cat("COVID: Median =", round(median(samples_combined[, "beta_sin[3]"]), 3),
+    " | Mean =", round(mean(samples_combined[, "beta_sin[3]"]), 3), "\n")
+cat("ILI:   Median =", round(median(samples_combined[, "beta_sin[4]"]), 3),
+    " | Mean =", round(mean(samples_combined[, "beta_sin[4]"]), 3), "\n")
+
+cat("\n=== Seasonal Coefficients (beta_cos) ===\n")
+cat("Flu:   Median =", round(median(samples_combined[, "beta_cos[1]"]), 3),
+    " | Mean =", round(mean(samples_combined[, "beta_cos[1]"]), 3), "\n")
+cat("RSV:   Median =", round(median(samples_combined[, "beta_cos[2]"]), 3),
+    " | Mean =", round(mean(samples_combined[, "beta_cos[2]"]), 3), "\n")
+cat("COVID: Median =", round(median(samples_combined[, "beta_cos[3]"]), 3),
+    " | Mean =", round(mean(samples_combined[, "beta_cos[3]"]), 3), "\n")
+cat("ILI:   Median =", round(median(samples_combined[, "beta_cos[4]"]), 3),
+    " | Mean =", round(mean(samples_combined[, "beta_cos[4]"]), 3), "\n")
 
 cat("\n=== Evaluation Summary ===\n")
 cat("Held out last", n_holdout, "weeks for evaluation\n")
