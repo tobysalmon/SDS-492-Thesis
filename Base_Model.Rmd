@@ -113,7 +113,7 @@ model {
   # NA values will be automatically predicted by JAGS
   for(i in 1:tmax) {
     flu[i]   ~ dnegbin(p1[i], r[1])
-    rsv[i]   ~ dnegbin(p2[i], r[2])
+    rsv[i]   ~ dnegbin(p2[i], r[2]). ## perhaps poisson would be better here
     covid[i] ~ dnegbin(p3[i], r[3])
     ili[i]   ~ dnegbin(p4[i], r[4])
 
@@ -134,8 +134,8 @@ model {
     r[k] ~ dunif(0, 250)
 
     mu0[k] ~ dnorm(0, 1e-4)
-    beta_sin[k] ~ dnorm(0, 0.1)
-    beta_cos[k] ~ dnorm(0, 0.1)
+    beta_sin[k] ~ dnorm(0, 1e-4)
+    beta_cos[k] ~ dnorm(0, 1e-4)
     prec.phi[k] ~ dgamma(0.01, 0.01)
     rho1[k] ~ dunif(0, 1)
 

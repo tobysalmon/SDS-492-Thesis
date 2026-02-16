@@ -1,35 +1,46 @@
 
 model {
-  # Likelihood for all time points
+  # Likelihood - Negative Binomial for all time points
   # NA values will be automatically predicted by JAGS
   for(i in 1:tmax) {
-    flu[i] ~ dpois(lambda1[i])
-    rsv[i] ~ dpois(lambda2[i])
-    covid[i] ~ dpois(lambda3[i])
-    ili[i] ~ dpois(lambda4[i])
-  }
+    flu[i]   ~ dnegbin(p1[i], r[1])
+    rsv[i]   ~ dnegbin(p2[i], r[2])
+    covid[i] ~ dnegbin(p3[i], r[3])
+    ili[i]   ~ dnegbin(p4[i], r[4])
 
-  # Log-linear model for rates
-  for(i in 1:tmax) {
+    # Reparameterize: p = r/(r+lambda) so mean = lambda, var = lambda + lambda^2/r
+    p1[i] <- r[1] / (r[1] + lambda1[i])
+    p2[i] <- r[2] / (r[2] + lambda2[i])
+    p3[i] <- r[3] / (r[3] + lambda3[i])
+    p4[i] <- r[4] / (r[4] + lambda4[i])
+
     lambda1[i] <- exp(phi[i,1])
     lambda2[i] <- exp(phi[i,2])
     lambda3[i] <- exp(phi[i,3])
     lambda4[i] <- exp(phi[i,4])
   }
 
-  # Priors - AR(1) process for each disease
+  # Priors - Seasonal AR(1) process for each disease
   for(k in 1:4) {
+    r[k] ~ dunif(0, 250)
+
     mu0[k] ~ dnorm(0, 1e-4)
+    beta_sin[k] ~ dnorm(0, 0.1)
+    beta_cos[k] ~ dnorm(0, 0.1)
     prec.phi[k] ~ dgamma(0.01, 0.01)
     rho1[k] ~ dunif(0, 1)
 
-    # First time point - stationary distribution
-    # Stationary precision = prec.phi * (1 - rho^2)
-    phi[1,k] ~ dnorm(mu0[k], prec.phi[k] * (1 - pow(rho1[k], 2)))
+    # Seasonal mean at time 1
+    mu_t[1,k] <- mu0[k] + beta_sin[k] * sin52[1] + beta_cos[k] * cos52[1]
 
-    # AR(1) evolution for subsequent time points
+    # First time point - stationary distribution
+    phi[1,k] ~ dnorm(mu_t[1,k], prec.phi[k] * (1 - pow(rho1[k], 2)))
+
+    # AR(1) with seasonal mean for subsequent time points
     for(i in 2:tmax) {
-      phi[i,k] ~ dnorm(mu0[k] + rho1[k] * (phi[i-1,k] - mu0[k]), prec.phi[k])
+      mu_t[i,k] <- mu0[k] + beta_sin[k] * sin52[i] + beta_cos[k] * cos52[i]
+      phi[i,k] ~ dnorm(mu_t[i,k] + rho1[k] * (phi[i-1,k] - mu_t[i-1,k]),
+                        prec.phi[k])
     }
   }
 }
