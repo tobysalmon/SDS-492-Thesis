@@ -37,7 +37,7 @@ data <- data %>%
 # Filter ILI data for state
 ili_data <- ili_data %>%
   filter(geography == fips) %>%
-  select(time, ili_count = delphi_fluview_num_ili) %>%
+  select(time, ili_count = delphi_fluview_num_ili, ili_number_patients_tested = delphi_fluview_num_patients) %>%
   arrange(time)
 
 state_pre <- get_estimates(
@@ -109,30 +109,29 @@ The model uses NA values for held-out observations, which JAGS will automaticall
 ```{r jags-model}
 model_string <- "
 model {
-  # Likelihood - Negative Binomial for all time points
+  # Likelihood - mixed distributions
   # NA values will be automatically predicted by JAGS
   for(i in 1:tmax) {
-    flu[i]   ~ dnegbin(p1[i], r[1])
-    rsv[i]   ~ dnegbin(p2[i], r[2]). ## perhaps poisson would be better here
-    covid[i] ~ dnegbin(p3[i], r[3])
-    ili[i]   ~ dnegbin(p4[i], r[4])
+    flu[i]   ~ dnegbin(p1[i], r[1])   # Negative Binomial
+    rsv[i]   ~ dpois(lambda2[i])       # Poisson
+    covid[i] ~ dnegbin(p3[i], r[3])   # Negative Binomial
+    ili[i]   ~ dnegbin(p4[i], r[4])   # Negative Binomial
 
-    # Reparameterize: p = r/(r+lambda) so mean = lambda, var = lambda + lambda^2/r
+    # Reparameterize NegBin: p = r/(r+lambda) so mean = lambda, var = lambda + lambda^2/r
     p1[i] <- r[1] / (r[1] + lambda1[i])
-    p2[i] <- r[2] / (r[2] + lambda2[i])
     p3[i] <- r[3] / (r[3] + lambda3[i])
     p4[i] <- r[4] / (r[4] + lambda4[i])
 
     lambda1[i] <- exp(phi[i,1])
     lambda2[i] <- exp(phi[i,2])
     lambda3[i] <- exp(phi[i,3])
-    lambda4[i] <- exp(phi[i,4]) # multiply by the population of the time (num_patients) to adjust for the sample size shift
+    # ILI offset: phi[i,4] is the log rate per patient tested;
+    # multiply by num_patients to get the expected count
+    lambda4[i] <- exp(phi[i,4]) * ili_number_patients_tested[i]
   }
 
   # Priors - Seasonal AR(1) process for each disease
   for(k in 1:4) {
-    r[k] ~ dunif(0, 250)
-
     mu0[k] ~ dnorm(0, 1e-4)
     beta_sin[k] ~ dnorm(0, 1e-4)
     beta_cos[k] ~ dnorm(0, 1e-4)
@@ -152,6 +151,12 @@ model {
                         prec.phi[k])
     }
   }
+
+  # Overdispersion priors for NegBin diseases only (flu, covid, ili)
+  # RSV uses Poisson so does not have an r parameter
+  r[1] ~ dunif(0, 250)   # Flu
+  r[3] ~ dunif(0, 250)   # COVID
+  r[4] ~ dunif(0, 250)   # ILI
 }
 "
 
@@ -202,6 +207,7 @@ jags_data <- list(
   rsv = rsv_data,
   covid = covid_data,
   ili = ili_data_vec,
+  num_patients = data_with_pop$ili_number_patients_tested,  # ILI exposure offset
   tmax = tmax,
   sin52 = sin52,
   cos52 = cos52
@@ -254,9 +260,10 @@ samples <- coda.samples(
 
 ```{r diagnostics}
 # Summary of key parameters
+# Note: r[2] is omitted since RSV uses Poisson (no overdispersion parameter)
 summary(samples[, c("mu0[1]", "mu0[2]", "mu0[3]", "mu0[4]",
                     "rho1[1]", "rho1[2]", "rho1[3]", "rho1[4]",
-                    "r[1]", "r[2]", "r[3]", "r[4]",
+                    "r[1]", "r[3]", "r[4]",
                     "beta_sin[1]", "beta_sin[2]", "beta_sin[3]", "beta_sin[4]",
                     "beta_cos[1]", "beta_cos[2]", "beta_cos[3]", "beta_cos[4]")])
 
@@ -271,9 +278,8 @@ plot(samples[, "mu0[2]"])
 plot(samples[, "mu0[3]"])
 plot(samples[, "mu0[4]"])
 
-# Trace plots for overdispersion parameters
+# Trace plots for overdispersion parameters (NegBin diseases only; RSV uses Poisson)
 plot(samples[, "r[1]"])
-plot(samples[, "r[2]"])
 plot(samples[, "r[3]"])
 plot(samples[, "r[4]"])
 
@@ -289,9 +295,10 @@ plot(samples[, "beta_cos[3]"])
 plot(samples[, "beta_cos[4]"])
 
 # Gelman-Rubin diagnostic (should be close to 1)
+# Note: r[2] omitted since RSV uses Poisson
 gelman.diag(samples[, c("mu0[1]", "mu0[2]", "mu0[3]", "mu0[4]",
                         "rho1[1]", "rho1[2]", "rho1[3]", "rho1[4]",
-                        "r[1]", "r[2]", "r[3]", "r[4]",
+                        "r[1]", "r[3]", "r[4]",
                         "beta_sin[1]", "beta_sin[2]", "beta_sin[3]", "beta_sin[4]",
                         "beta_cos[1]", "beta_cos[2]", "beta_cos[3]", "beta_cos[4]")])
 ```
@@ -584,13 +591,12 @@ cat("COVID: Median =", round(median(samples_combined[, "mu0[3]"]), 3),
 cat("ILI:   Median =", round(median(samples_combined[, "mu0[4]"]), 3),
     " | Mean =", round(mean(samples_combined[, "mu0[4]"]), 3), "\n")
 
-# Overdispersion parameters
+# Overdispersion parameters (NegBin diseases only; RSV uses Poisson, no r parameter)
 cat("\n=== Overdispersion Parameters (r) ===\n")
 cat("(larger r = closer to Poisson; smaller r = more overdispersion)\n")
 cat("Flu:   Median =", round(median(samples_combined[, "r[1]"]), 3),
     " | Mean =", round(mean(samples_combined[, "r[1]"]), 3), "\n")
-cat("RSV:   Median =", round(median(samples_combined[, "r[2]"]), 3),
-    " | Mean =", round(mean(samples_combined[, "r[2]"]), 3), "\n")
+cat("RSV:   Poisson distribution (no overdispersion parameter)\n")
 cat("COVID: Median =", round(median(samples_combined[, "r[3]"]), 3),
     " | Mean =", round(mean(samples_combined[, "r[3]"]), 3), "\n")
 cat("ILI:   Median =", round(median(samples_combined[, "r[4]"]), 3),
