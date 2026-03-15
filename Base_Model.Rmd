@@ -126,7 +126,7 @@ model {
     lambda1[i] <- exp(phi[i,1])
     lambda2[i] <- exp(phi[i,2])
     lambda3[i] <- exp(phi[i,3])
-    lambda4[i] <- exp(phi[i,4])
+    lambda4[i] <- exp(phi[i,4]) # multiply by the population of the time (num_patients) to adjust for the sample size shift
   }
 
   # Priors - Seasonal AR(1) process for each disease
