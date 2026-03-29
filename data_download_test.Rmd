@@ -1,0 +1,65 @@
+---
+title: "data download test"
+output: html_document
+date: "2026-03-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(epidatr)
+library(dplyr)
+
+res <- pub_fluview(
+  regions = "mi",
+  epiweeks = epirange(201901, 202999)
+) %>%
+  select(epiweek, region, num_ili, num_patients, num_providers, ili, wili)
+
+```
+```{r}
+library(dplyr)
+
+url <- paste0(
+  "https://data.cdc.gov/resource/kvib-3txy.csv",
+  "?$where=site=%27Michigan%27%20AND%20week_ending_date%20>=%20%272019-01-01%27",
+  "&$limit=50000"
+)
+
+resp_net_mi <- read.csv(url) %>%
+  filter(
+    age_group == "Overall",
+    sex == "Overall",
+    race_ethnicity == "Overall",
+    rate_type == "Observed"
+  ) %>%
+  select(surveillance_network, season, week_ending_date, mmwr_year,
+         mmwr_week, site, weekly_rate) |>
+  mutate(
+    week_ending_date = as.Date(week_ending_date),
+    weekly_rate      = as.numeric(weekly_rate),
+    mmwr_year        = as.integer(mmwr_year),
+    mmwr_week        = as.integer(mmwr_week)
+  )|>
+  pivot_wider(
+    names_from = surveillance_network,
+    values_from = c(weekly_rate)
+  ) |>
+  arrange(mmwr_year, mmwr_week) 
+
+
+
+
+resp_net_mi <- resp_net_mi |>
+  mutate(
+    flu_rate = replace_na(resp_net_mi$`FluSurv-NET`,0),
+    rsv_rate = replace_na(resp_net_mi$`RSV-NET`,0),
+    covid_rate = replace_na(resp_net_mi$`COVID-NET`,0)
+  ) |>
+  select(-c(`FluSurv-NET`, `RSV-NET`, `COVID-NET`, Combined))
+
+
+```
+

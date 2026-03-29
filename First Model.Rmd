@@ -136,7 +136,7 @@ model {
     beta_sin[k] ~ dnorm(0, 1e-4)
     beta_cos[k] ~ dnorm(0, 1e-4)
     prec.phi[k] ~ dgamma(0.01, 0.01)
-    rho1[k] ~ dunif(0, 1)
+    rho1[k] ~ dunif(0, 1) # for practical reasons
 
     # Seasonal mean at time 1
     mu_t[1,k] <- mu0[k] + beta_sin[k] * sin52[1] + beta_cos[k] * cos52[1]

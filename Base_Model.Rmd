@@ -154,9 +154,9 @@ model {
 
   # Overdispersion priors for NegBin diseases only (flu, covid, ili)
   # RSV uses Poisson so does not have an r parameter
-  r[1] ~ dunif(0, 250)   # Flu
-  r[3] ~ dunif(0, 250)   # COVID
-  r[4] ~ dunif(0, 250)   # ILI
+  r[1] ~ dgamma(0.1, 0.1)   # Flu
+  r[3] ~ dgamma(0.1, 0.1)   # COVID
+  r[4] ~ dgamma(0.1, 0.1)   # ILI
 }
 "
 

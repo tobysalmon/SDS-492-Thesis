@@ -1,0 +1,345 @@
+---
+title: "Model 3: Multivariate Normal AR(1)"
+output: html_document
+date: "2026-03-27"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(rjags)
+library(tidyverse)
+library(coda)
+library(tidycensus)
+library(HDInterval)
+library(patchwork)
+```
+
+```{r}
+#census_api_key("81e4817f989c60bf268764565acf7fb7fbe0e2cf", install = TRUE)
+```
+
+## Load in the Data
+```{r load_data}
+data <- read_csv("https://raw.githubusercontent.com/PopHIVE/Ingest/main/data/respnet/standard/data.csv.gz")
+ili_data <- read_csv("https://raw.githubusercontent.com/PopHIVE/Ingest/main/data/delphi_ili_fluview/standard/data.csv.gz")
+
+
+# filtering the data to state and using "total" as the age demographic
+
+fips <- "26" # Michigan
+
+data <- data %>%
+  filter(geography == fips , age == "Total")
+
+# Filter ILI data for state
+ili_data <- ili_data %>%
+  filter(geography == fips) %>%
+  select(time, ili_count = delphi_fluview_num_ili, ili_number_patients_tested = delphi_fluview_num_patients) %>%
+  arrange(time)
+
+state_pre <- get_estimates(
+  geography = "state",
+  state = fips,
+  product = "population",
+  vintage = 2019,
+  time_series = TRUE
+) |>
+  filter(variable == "POP") |>
+  mutate(year = 2009 + DATE) |>
+  filter(year %in% c(2018, 2019)) |>
+  arrange(year)|>
+  pull(value)
+
+state_pop <- get_estimates(
+  geography = "state",
+  state = fips,
+  product = "population",
+  vintage = 2025,  # Most recent available
+  time_series = TRUE
+) |>
+  filter(variable == "POPESTIMATE", year %in% c(2020:2025)) %>%
+  arrange(year) %>%
+  pull(value)
+
+
+state_pop_estimates <- tibble(
+  year = 2018:2026,
+  population = c(
+    # State census population estimates
+    state_pre[1], #2018
+    state_pre[2], #2019
+    state_pop[1],   #2020
+    state_pop[2],   #2021
+    state_pop[3],   #2022
+    state_pop[4],   #2023
+    state_pop[5],   #2024
+    state_pop[6],   #2025
+    state_pop[6]   #2026 - using 2025 estimate for 2026
+  )
+)
+
+```
+
+## Merging Population Estimates with Data
+```{r population_merge}
+data_with_pop <- data %>%
+  mutate(year = year(time)) %>%
+  left_join(state_pop_estimates, by = "year")
+
+data_with_pop <- data_with_pop %>%
+  mutate(
+    covid_count = round(rate_covid * population / 100000),
+    flu_count = round(rate_flu * population / 100000),
+    rsv_count = round(rate_rsv * population / 100000)
+  )
+
+# Merge ILI data with the main dataset
+data_with_pop <- data_with_pop %>%
+  left_join(ili_data, by = "time") %>%
+  mutate(ili_count = replace_na(ili_count, 0))
+```
+
+## Model 3: Multivariate Normal AR(1)
+
+All four diseases evolve jointly via a multivariate normal AR(1) process.
+Each disease retains its own AR(1) autocorrelation (rho1[k]) and seasonal mean,
+but the innovations are correlated through a 4x4 covariance matrix (Sigma).
+This allows bidirectional information sharing: if flu has an unexpectedly high
+week, the model learns whether RSV and ILI also tend to be unexpectedly high.
+
+```{r jags-model}
+model_string <- "
+model {
+  # Likelihood - Negative Binomial for all diseases
+  for(i in 1:tmax) {
+    flu[i]   ~ dnegbin(p1[i], r[1])
+    rsv[i]   ~ dnegbin(p2[i], r[2])
+    covid[i] ~ dnegbin(p3[i], r[3])
+    ili[i]   ~ dnegbin(p4[i], r[4])
+
+    p1[i] <- r[1] / (r[1] + lambda1[i])
+    p2[i] <- r[2] / (r[2] + lambda2[i])
+    p3[i] <- r[3] / (r[3] + lambda3[i])
+    p4[i] <- r[4] / (r[4] + lambda4[i])
+
+    lambda1[i] <- exp(phi[i,1])
+    lambda2[i] <- exp(phi[i,2])
+    lambda3[i] <- exp(phi[i,3])
+    lambda4[i] <- exp(phi[i,4]) * num_patients[i]
+  }
+
+  # Seasonal means for all diseases
+  for(k in 1:4) {
+    mu0[k] ~ dnorm(0, 1e-4)
+    beta_sin[k] ~ dnorm(0, 1e-4)
+    beta_cos[k] ~ dnorm(0, 1e-4)
+    rho1[k] ~ dunif(0, 1)
+
+    for(i in 1:tmax) {
+      mu_t[i,k] <- mu0[k] + beta_sin[k] * sin52[i] + beta_cos[k] * cos52[i]
+    }
+  }
+
+  # First time point - vague independent priors
+  # (the stationary distribution for a MVN-AR(1) is complex, so we simplify)
+  for(k in 1:4) {
+    phi[1,k] ~ dnorm(mu_t[1,k], 0.01)
+  }
+
+  # Multivariate AR(1) for subsequent time points
+  # Each disease's conditional mean follows its own AR(1), but innovations are correlated
+  for(i in 2:tmax) {
+    for(k in 1:4) {
+      mu_phi[i,k] <- mu_t[i,k] + rho1[k] * (phi[i-1,k] - mu_t[i-1,k])
+    }
+    phi[i,1:4] ~ dmnorm(mu_phi[i,1:4], Omega[1:4,1:4])
+  }
+
+  # Precision matrix (inverse of covariance) with Wishart prior
+  # Sigma = inverse(Omega) is the 4x4 covariance matrix of innovations
+  # Off-diagonal elements capture cross-disease correlations
+  Omega[1:4,1:4] ~ dwish(R[1:4,1:4], 5)
+  Sigma[1:4,1:4] <- inverse(Omega[1:4,1:4])
+
+  # Overdispersion priors
+  r[1] ~ dgamma(0.1, 0.1)
+  r[2] ~ dgamma(0.1, 0.1)
+  r[3] ~ dgamma(0.1, 0.1)
+  r[4] ~ dgamma(0.1, 0.1)
+}
+"
+
+writeLines(model_string, "model3_mvn_ar1.jags")
+```
+
+## Prepare JAGS Data
+
+```{r jags-data}
+# Asymmetric holdout: ILI has 1-week lag, specific signals have 2-week lag
+n_holdout_specific <- 2
+n_holdout_ili <- 1
+
+tmax <- nrow(data_with_pop)
+
+# Create harmonic vectors for seasonality (52-week cycle)
+t_vec <- 1:tmax
+sin52 <- sin(2 * pi * t_vec / 52)
+cos52 <- cos(2 * pi * t_vec / 52)
+
+cat("Total observations:", tmax, "\n")
+cat("Flu/RSV/COVID: training on", tmax - n_holdout_specific, "| evaluating last", n_holdout_specific, "\n")
+cat("ILI: training on", tmax - n_holdout_ili, "| evaluating last", n_holdout_ili, "\n")
+
+# Store actual values for comparison BEFORE setting to NA
+actuals_holdout_specific <- data_with_pop %>%
+  tail(n_holdout_specific) %>%
+  select(time, flu_count, rsv_count, covid_count)
+
+actuals_holdout_ili <- data_with_pop %>%
+  tail(n_holdout_ili) %>%
+  select(time, ili_count)
+
+cat("\nHeld-out actual values (specific signals - last 2 weeks):\n")
+print(actuals_holdout_specific)
+cat("\nHeld-out actual values (ILI - last 1 week):\n")
+print(actuals_holdout_ili)
+
+# Create data vectors with NA for held-out observations
+flu_data <- data_with_pop$flu_count
+rsv_data <- data_with_pop$rsv_count
+covid_data <- data_with_pop$covid_count
+ili_data_vec <- data_with_pop$ili_count
+
+# Specific signals: last 2 weeks are NA
+flu_data[(tmax - n_holdout_specific + 1):tmax] <- NA
+rsv_data[(tmax - n_holdout_specific + 1):tmax] <- NA
+covid_data[(tmax - n_holdout_specific + 1):tmax] <- NA
+
+# ILI: only last 1 week is NA (has 1-week advantage)
+ili_data_vec[(tmax - n_holdout_ili + 1):tmax] <- NA
+
+# Prepare data list for JAGS
+# R is the scale matrix for the Wishart prior on the precision matrix
+jags_data <- list(
+  flu = flu_data,
+  rsv = rsv_data,
+  covid = covid_data,
+  ili = ili_data_vec,
+  num_patients = data_with_pop$ili_number_patients_tested,  # ILI exposure offset (never NA)
+  tmax = tmax,
+  sin52 = sin52,
+  cos52 = cos52,
+  R = diag(4)  # 4x4 identity matrix - scale matrix for Wishart prior
+)
+
+cat("\nLast few values passed to JAGS (NA = to be predicted):\n")
+cat("Flu:", tail(jags_data$flu, 5), "\n")
+cat("RSV:", tail(jags_data$rsv, 5), "\n")
+cat("COVID:", tail(jags_data$covid, 5), "\n")
+cat("ILI:", tail(jags_data$ili, 5), "\n")
+```
+
+## Run JAGS Model
+
+```{r run-jags, message=FALSE, warning=FALSE}
+# Parameters to monitor - includes Sigma (covariance matrix) and Omega (precision matrix)
+params <- c("mu0", "rho1", "r", "beta_sin", "beta_cos",
+            "Sigma",
+            "lambda1", "lambda2", "lambda3", "lambda4",
+            "flu", "rsv", "covid", "ili")
+
+# Set seeds for reproducibility
+inits <- list(
+  list(".RNG.seed" = 123, ".RNG.name" = "base::Wichmann-Hill"),
+  list(".RNG.seed" = 456, ".RNG.name" = "base::Wichmann-Hill"),
+  list(".RNG.seed" = 789, ".RNG.name" = "base::Wichmann-Hill")
+)
+
+# Initialize the model
+jags_model <- jags.model(
+  file = "model3_mvn_ar1.jags",
+  data = jags_data,
+  n.chains = 3,
+  n.adapt = 2000,   # More adaptation for MVN model
+  inits = inits
+)
+
+# Burn-in (longer for more complex model)
+update(jags_model, n.iter = 20000)
+
+samples <- coda.samples(
+  model = jags_model,
+  variable.names = params,
+  n.iter = 30000,
+  thin = 15
+)
+```
+
+## Model Diagnostics
+
+```{r diagnostics}
+# Summary of key parameters
+summary(samples[, c("mu0[1]", "mu0[2]", "mu0[3]", "mu0[4]",
+                    "rho1[1]", "rho1[2]", "rho1[3]", "rho1[4]",
+                    "r[1]", "r[2]", "r[3]", "r[4]",
+                    "beta_sin[1]", "beta_sin[2]", "beta_sin[3]", "beta_sin[4]",
+                    "beta_cos[1]", "beta_cos[2]", "beta_cos[3]", "beta_cos[4]")])
+
+# Covariance matrix summary - diagonal elements are variances, off-diagonal are covariances
+cat("\n=== Estimated Covariance Matrix (Sigma) ===\n")
+cat("Diagonal = innovation variances; off-diagonal = cross-disease covariances\n")
+cat("Order: Flu, RSV, COVID, ILI\n\n")
+summary(samples[, c("Sigma[1,1]", "Sigma[1,2]", "Sigma[1,3]", "Sigma[1,4]",
+                    "Sigma[2,2]", "Sigma[2,3]", "Sigma[2,4]",
+                    "Sigma[3,3]", "Sigma[3,4]",
+                    "Sigma[4,4]")])
+
+# Trace plots for AR(1) parameters
+plot(samples[, "rho1[1]"])
+plot(samples[, "rho1[2]"])
+plot(samples[, "rho1[3]"])
+plot(samples[, "rho1[4]"])
+
+plot(samples[, "mu0[1]"])
+plot(samples[, "mu0[2]"])
+plot(samples[, "mu0[3]"])
+plot(samples[, "mu0[4]"])
+
+# Trace plots for overdispersion parameters
+plot(samples[, "r[1]"])
+plot(samples[, "r[2]"])
+plot(samples[, "r[3]"])
+plot(samples[, "r[4]"])
+
+# Trace plots for seasonal coefficients
+plot(samples[, "beta_sin[1]"])
+plot(samples[, "beta_sin[2]"])
+plot(samples[, "beta_sin[3]"])
+plot(samples[, "beta_sin[4]"])
+
+plot(samples[, "beta_cos[1]"])
+plot(samples[, "beta_cos[2]"])
+plot(samples[, "beta_cos[3]"])
+plot(samples[, "beta_cos[4]"])
+
+# Trace plots for key covariance elements (cross-disease correlations)
+plot(samples[, "Sigma[1,4]"])  # Flu-ILI covariance
+plot(samples[, "Sigma[2,4]"])  # RSV-ILI covariance
+plot(samples[, "Sigma[3,4]"])  # COVID-ILI covariance
+plot(samples[, "Sigma[1,2]"])  # Flu-RSV covariance
+plot(samples[, "Sigma[1,3]"])  # Flu-COVID covariance
+plot(samples[, "Sigma[2,3]"])  # RSV-COVID covariance
+
+# Gelman-Rubin diagnostic (should be close to 1)
+gelman.diag(samples[, c("mu0[1]", "mu0[2]", "mu0[3]", "mu0[4]",
+                        "rho1[1]", "rho1[2]", "rho1[3]", "rho1[4]",
+                        "r[1]", "r[2]", "r[3]", "r[4]",
+                        "beta_sin[1]", "beta_sin[2]", "beta_sin[3]", "beta_sin[4]",
+                        "beta_cos[1]", "beta_cos[2]", "beta_cos[3]", "beta_cos[4]",
+                        "Sigma[1,1]", "Sigma[2,2]", "Sigma[3,3]", "Sigma[4,4]",
+                        "Sigma[1,2]", "Sigma[1,3]", "Sigma[1,4]",
+                        "Sigma[2,3]", "Sigma[2,4]", "Sigma[3,4]")])
+```
