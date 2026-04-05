@@ -15,6 +15,7 @@ library(coda)
 library(tidycensus)
 library(HDInterval)
 library(patchwork)
+library(scoringRules)
 ```
 
 ```{r}
@@ -358,6 +359,12 @@ for (h in 1:n_holdout) {
   eval_results$pred_covid_hdi_upper[h] <- covid_hdi[2]
   eval_results$pred_ili_hdi_lower[h] <- ili_hdi[1]
   eval_results$pred_ili_hdi_upper[h] <- ili_hdi[2]
+
+  # CRPS scores (full posterior vs observed)
+  eval_results$crps_flu[h] <- crps_sample(y = eval_results$actual_flu[h], dat = flu_samples)
+  eval_results$crps_rsv[h] <- crps_sample(y = eval_results$actual_rsv[h], dat = rsv_samples)
+  eval_results$crps_covid[h] <- crps_sample(y = eval_results$actual_covid[h], dat = covid_samples)
+  eval_results$crps_ili[h] <- crps_sample(y = eval_results$actual_ili[h], dat = ili_samples)
 }
 
 # Calculate errors and coverage
@@ -450,6 +457,12 @@ metrics <- tibble(
     mean(eval_results$abs_error_covid_median),
     mean(eval_results$abs_error_ili_median)
   ),
+  CRPS = c(
+    mean(eval_results$crps_flu),
+    mean(eval_results$crps_rsv),
+    mean(eval_results$crps_covid),
+    mean(eval_results$crps_ili)
+  ),
   `RMSE (Median)` = c(
     sqrt(mean(eval_results$abs_error_flu_median^2)),
     sqrt(mean(eval_results$abs_error_rsv_median^2)),
@@ -466,6 +479,7 @@ metrics <- tibble(
 
 cat("=== Evaluation Metrics ===\n")
 cat("MAE = Mean Absolute Error\n")
+cat("CRPS = Continuous Ranked Probability Score (lower is better)\n")
 cat("RMSE = Root Mean Squared Error\n")
 cat("Coverage = Proportion of actuals within 95% HDI (target: 0.95)\n\n")
 print(metrics)

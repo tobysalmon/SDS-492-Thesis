@@ -1,0 +1,60 @@
+
+model {
+  # Likelihood - Negative Binomial for all diseases
+  for(i in 1:tmax) {
+    flu[i]   ~ dnegbin(p1[i], r[1])
+    rsv[i]   ~ dnegbin(p2[i], r[2])
+    covid[i] ~ dnegbin(p3[i], r[3])
+    ili[i]   ~ dnegbin(p4[i], r[4])
+
+    p1[i] <- r[1] / (r[1] + lambda1[i])
+    p2[i] <- r[2] / (r[2] + lambda2[i])
+    p3[i] <- r[3] / (r[3] + lambda3[i])
+    p4[i] <- r[4] / (r[4] + lambda4[i])
+
+    lambda1[i] <- exp(phi[i,1])
+    lambda2[i] <- exp(phi[i,2])
+    lambda3[i] <- exp(phi[i,3])
+    lambda4[i] <- exp(phi[i,4]) * num_patients[i]
+  }
+
+  # Seasonal means for all diseases
+  for(k in 1:4) {
+    mu0[k] ~ dnorm(0, 1e-4)
+    beta_sin[k] ~ dnorm(0, 1e-4)
+    beta_cos[k] ~ dnorm(0, 1e-4)
+    rho1[k] ~ dunif(0, 1)
+
+    for(i in 1:tmax) {
+      mu_t[i,k] <- mu0[k] + beta_sin[k] * sin52[i] + beta_cos[k] * cos52[i]
+    }
+  }
+
+  # First time point - vague independent priors
+  # (the stationary distribution for a MVN-AR(1) is complex, so we simplify)
+  for(k in 1:4) {
+    phi[1,k] ~ dnorm(mu_t[1,k], 0.01)
+  }
+
+  # Multivariate AR(1) for subsequent time points
+  # Each disease's conditional mean follows its own AR(1), but innovations are correlated
+  for(i in 2:tmax) {
+    for(k in 1:4) {
+      mu_phi[i,k] <- mu_t[i,k] + rho1[k] * (phi[i-1,k] - mu_t[i-1,k])
+    }
+    phi[i,1:4] ~ dmnorm(mu_phi[i,1:4], Omega[1:4,1:4])
+  }
+
+  # Precision matrix (inverse of covariance) with Wishart prior
+  # Sigma = inverse(Omega) is the 4x4 covariance matrix of innovations
+  # Off-diagonal elements capture cross-disease correlations
+  Omega[1:4,1:4] ~ dwish(R[1:4,1:4], 5)
+  Sigma[1:4,1:4] <- inverse(Omega[1:4,1:4])
+
+  # Overdispersion priors
+  r[1] ~ dgamma(0.1, 0.1)
+  r[2] ~ dgamma(0.1, 0.1)
+  r[3] ~ dgamma(0.1, 0.1)
+  r[4] ~ dgamma(0.1, 0.1)
+}
+

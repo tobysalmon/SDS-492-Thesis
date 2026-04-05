@@ -15,6 +15,7 @@ library(coda)
 library(tidycensus)
 library(HDInterval)
 library(patchwork)
+library(scoringRules)
 ```
 
 ```{r}
@@ -330,4 +331,75 @@ gelman.diag(samples[, c("mu0[1]", "mu0[2]", "mu0[3]", "mu0[4]",
                         "beta_sin[1]", "beta_sin[2]", "beta_sin[3]", "beta_sin[4]",
                         "beta_cos[1]", "beta_cos[2]", "beta_cos[3]", "beta_cos[4]",
                         "b_ili[1]", "b_ili[2]", "b_ili[3]")])
+```
+
+## Evaluation: MAE and CRPS for Flu, RSV, COVID
+
+Evaluate nowcast accuracy for the specific diseases using:
+- **MAE**: Mean Absolute Error using the posterior median as point estimate
+- **CRPS**: Continuous Ranked Probability Score using the full posterior distribution
+  (lower is better for both; CRPS rewards calibrated uncertainty, not just point accuracy)
+
+```{r evaluation, warning=FALSE}
+# Combine chains
+samples_combined <- do.call(rbind, samples)
+
+# Evaluate over the held-out weeks for specific diseases (last 2 weeks)
+eval_results <- tibble(
+  week = 1:n_holdout_specific,
+  time = actuals_holdout_specific$time,
+  actual_flu = actuals_holdout_specific$flu_count,
+  actual_rsv = actuals_holdout_specific$rsv_count,
+  actual_covid = actuals_holdout_specific$covid_count
+)
+
+for (h in 1:n_holdout_specific) {
+  idx <- (tmax - n_holdout_specific) + h
+
+  # Extract posterior samples for held-out predictions
+  flu_samples <- samples_combined[, paste0("flu[", idx, "]")]
+  rsv_samples <- samples_combined[, paste0("rsv[", idx, "]")]
+  covid_samples <- samples_combined[, paste0("covid[", idx, "]")]
+
+  # Median point estimates
+  eval_results$pred_flu_median[h] <- median(flu_samples)
+  eval_results$pred_rsv_median[h] <- median(rsv_samples)
+  eval_results$pred_covid_median[h] <- median(covid_samples)
+
+  # Absolute errors (for MAE)
+  eval_results$abs_error_flu[h] <- abs(eval_results$actual_flu[h] - median(flu_samples))
+  eval_results$abs_error_rsv[h] <- abs(eval_results$actual_rsv[h] - median(rsv_samples))
+  eval_results$abs_error_covid[h] <- abs(eval_results$actual_covid[h] - median(covid_samples))
+
+  # CRPS scores (full posterior vs observed)
+  eval_results$crps_flu[h] <- crps_sample(y = eval_results$actual_flu[h], dat = flu_samples)
+  eval_results$crps_rsv[h] <- crps_sample(y = eval_results$actual_rsv[h], dat = rsv_samples)
+  eval_results$crps_covid[h] <- crps_sample(y = eval_results$actual_covid[h], dat = covid_samples)
+}
+
+cat("=== Per-Week Results ===\n\n")
+print(eval_results)
+```
+
+```{r summary-metrics}
+# Summary metrics across held-out weeks
+metrics <- tibble(
+  Disease = c("Flu", "RSV", "COVID"),
+  MAE = c(
+    mean(eval_results$abs_error_flu),
+    mean(eval_results$abs_error_rsv),
+    mean(eval_results$abs_error_covid)
+  ),
+  CRPS = c(
+    mean(eval_results$crps_flu),
+    mean(eval_results$crps_rsv),
+    mean(eval_results$crps_covid)
+  )
+)
+
+cat("=== Summary Metrics (averaged over held-out weeks) ===\n")
+cat("MAE = Mean Absolute Error (median point estimate)\n")
+cat("CRPS = Continuous Ranked Probability Score (full posterior)\n")
+cat("Lower is better for both.\n\n")
+print(metrics)
 ```
