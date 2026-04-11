@@ -1,0 +1,244 @@
+---
+title: "Rolling-Origin Backtest — Kinsa Models"
+output: html_document
+date: "2026-04-08"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libs, message=FALSE, warning=FALSE}
+library(rjags)
+library(tidyverse)
+library(coda)
+library(tidycensus)
+library(HDInterval)
+library(scoringRules)
+library(patchwork)
+
+# Fit functions
+source("R/fit_base_kinsa.R")
+source("R/fit_m1_kinsa.R")
+source("R/fit_m2_kinsa.R")
+source("R/fit_m3_kinsa.R")
+```
+
+## Load data once
+
+Same data-loading pipeline as `Base_Model_Kinsa.Rmd`. Done once up-front so
+the rolling-origin loop just slices this dataframe instead of re-downloading.
+
+```{r load_data, message=FALSE, warning=FALSE}
+# -------- FILL IN: local path to your Kinsa CSV --------
+kinsa_path <- "/Users/tobysalmon/Desktop/kinsa_michigan_weekly.csv"   
+# -------------------------------------------------------
+
+kinsa_state <- "Michigan"
+fips        <- "26"
+
+data <- read_csv("https://raw.githubusercontent.com/PopHIVE/Ingest/main/data/respnet/standard/data.csv.gz")
+kinsa_raw <- read_csv(kinsa_path)
+
+data <- data %>%
+  filter(geography == fips, age == "Total")
+
+kinsa_data <- kinsa_raw %>%
+  filter(region_name == kinsa_state) %>%
+  mutate(time = as.Date(time)) %>%
+  select(time, percent_ill) %>%
+  arrange(time)
+
+state_pre <- get_estimates(
+  geography = "state", state = fips,
+  product = "population", vintage = 2019, time_series = TRUE
+) |>
+  filter(variable == "POP") |>
+  mutate(year = 2009 + DATE) |>
+  filter(year %in% c(2018, 2019)) |>
+  arrange(year) |> pull(value)
+
+state_pop <- get_estimates(
+  geography = "state", state = fips,
+  product = "population", vintage = 2025, time_series = TRUE
+) |>
+  filter(variable == "POPESTIMATE", year %in% c(2020:2025)) %>%
+  arrange(year) %>% pull(value)
+
+state_pop_estimates <- tibble(
+  year = 2018:2026,
+  population = c(
+    state_pre[1], state_pre[2],
+    state_pop[1], state_pop[2], state_pop[3],
+    state_pop[4], state_pop[5], state_pop[6], state_pop[6]
+  )
+)
+
+data_with_pop <- data %>%
+  mutate(year = year(time)) %>%
+  left_join(state_pop_estimates, by = "year") %>%
+  mutate(
+    covid_count = round(rate_covid * population / 100000),
+    flu_count   = round(rate_flu   * population / 100000),
+    rsv_count   = round(rate_rsv   * population / 100000)
+  ) %>%
+  inner_join(kinsa_data, by = "time") %>%
+  arrange(time)
+
+cat("Merged panel:", nrow(data_with_pop), "weeks\n")
+cat("Date range:", as.character(min(data_with_pop$time)), "to",
+    as.character(max(data_with_pop$time)), "\n")
+```
+
+## Backtest configuration
+
+```{r backtest-config}
+# Number of rolling-origin as-of dates to evaluate.
+# Start small (5-10) while debugging, then bump to 20+ for the paper.
+n_as_of <- 10
+
+max_time <- max(data_with_pop$time)
+as_of_dates <- seq(max_time - weeks(n_as_of - 1), max_time, by = "week")
+
+# Registry of all models to backtest
+model_registry <- list(
+  base_kinsa = fit_base_kinsa,
+  m1_kinsa   = fit_m1_kinsa
+  #m2_kinsa   = fit_m2_kinsa,
+  #m3_kinsa   = fit_m3_kinsa
+)
+
+results_path <- "results/backtest_predictions.csv"
+dir.create("results", showWarnings = FALSE, recursive = TRUE)
+
+cat("Will fit", length(model_registry), "model(s) x", length(as_of_dates),
+    "as-of dates =", length(model_registry) * length(as_of_dates), "total fits\n")
+cat("As-of dates:\n")
+print(as_of_dates)
+```
+
+## Run the backtest (resumable / cached)
+
+Each (model, as_of) fit is written to `results/backtest_predictions.csv`
+immediately after it finishes. If you re-run this chunk, already-completed
+fits are skipped — so a crash or interruption just means picking up where
+you left off.
+
+```{r run-backtest, message=TRUE, warning=FALSE}
+log_msg <- function(...) {
+  cat(..., "\n", sep = "")
+  flush.console()
+}
+
+existing <- if (file.exists(results_path)) {
+  read_csv(results_path, show_col_types = FALSE) %>%
+    mutate(as_of = as.Date(as_of), target_date = as.Date(target_date))
+} else {
+  tibble()
+}
+
+for (mname in names(model_registry)) {
+  fit_fn <- model_registry[[mname]]
+
+  for (i in seq_along(as_of_dates)) {
+    d <- as.Date(as_of_dates[i])
+
+    already_done <- nrow(existing) > 0 &&
+      any(existing$model == mname & existing$as_of == d)
+
+    if (already_done) {
+      log_msg(sprintf("[%s | %s] cached, skipping", mname, format(d)))
+      next
+    }
+
+    t0 <- Sys.time()
+    log_msg(sprintf("[%s | %s] fitting...", mname, format(d)))
+
+    preds <- tryCatch(
+      fit_fn(data_with_pop, as_of_date = d),
+      error = function(e) {
+        log_msg("  ERROR: ", conditionMessage(e))
+        NULL
+      }
+    )
+
+    if (is.null(preds)) next
+
+    existing <- bind_rows(existing, preds)
+    write_csv(existing, results_path)
+
+    dt <- round(as.numeric(difftime(Sys.time(), t0, units = "secs")), 1)
+    log_msg(sprintf("  done in %ss (%d rows)", dt, nrow(preds)))
+  }
+}
+
+results <- read_csv(results_path, show_col_types = FALSE) %>%
+  mutate(as_of = as.Date(as_of), target_date = as.Date(target_date))
+
+cat("\nTotal rows in results:", nrow(results), "\n")
+```
+
+## Summary metrics
+
+```{r metrics}
+metrics <- results %>%
+  group_by(model, disease) %>%
+  summarise(
+    n          = n(),
+    MAE        = mean(abs(truth - median)),
+    RMSE       = sqrt(mean((truth - median)^2)),
+    CRPS       = mean(crps),
+    cover_50   = mean(truth >= q25  & truth <= q75),
+    cover_95   = mean(truth >= q025 & truth <= q975),
+    .groups = "drop"
+  ) %>%
+  arrange(disease, model)
+
+cat("=== Rolling-origin backtest metrics ===\n")
+print(metrics)
+```
+
+## Per-week score distributions
+
+Box plots of per-week CRPS across the backtest window — gives a sense of
+variability, not just the mean.
+
+```{r crps-boxplot, fig.width=9, fig.height=5}
+ggplot(results, aes(x = model, y = crps, fill = model)) +
+  geom_boxplot(alpha = 0.6, outlier.alpha = 0.4) +
+  facet_wrap(~ disease, scales = "free_y") +
+  labs(title = "Per-week CRPS across rolling-origin backtest",
+       x = NULL, y = "CRPS (lower is better)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+## Prediction traces over the backtest window
+
+For each disease, plot the truth (points) against each model's median
+prediction with a 50% interval.
+
+```{r prediction-traces, fig.width=10, fig.height=8}
+ggplot(results, aes(x = target_date)) +
+  geom_ribbon(aes(ymin = q25, ymax = q75, fill = model), alpha = 0.25) +
+  geom_line(aes(y = median, color = model), linewidth = 0.8) +
+  geom_point(aes(y = truth), color = "black", size = 2) +
+  facet_wrap(~ disease, ncol = 1, scales = "free_y") +
+  labs(title = "Rolling-origin nowcasts vs. truth",
+       subtitle = "Points = observed, lines = posterior median, ribbon = 50% CI",
+       x = NULL, y = "Count") +
+  theme_minimal()
+```
+
+## Error over time
+
+```{r error-over-time, fig.width=10, fig.height=5}
+results %>%
+  mutate(abs_error = abs(truth - median)) %>%
+  ggplot(aes(x = target_date, y = abs_error, color = model)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  facet_wrap(~ disease, scales = "free_y") +
+  labs(title = "Absolute error by week", x = NULL, y = "|truth - median|") +
+  theme_minimal()
+```

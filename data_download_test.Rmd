@@ -10,7 +10,31 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ```{r}
 library(epidatr)
-library(dplyr)
+library(tidyverse)
+```
+
+
+```{r}
+data <- read_csv("https://raw.githubusercontent.com/PopHIVE/Ingest/main/data/respnet/standard/data.csv.gz")
+ili_data <- read_csv("https://raw.githubusercontent.com/PopHIVE/Ingest/main/data/delphi_ili_fluview/standard/data.csv.gz")
+
+
+# filtering the data to state and using "total" as the age demographic
+
+fips <- "26" # Michigan
+
+data <- data %>%
+  filter(geography == fips , age == "Total")
+
+# Filter ILI data for state
+ili_data <- ili_data %>%
+  filter(geography == fips)
+
+tail(data)
+tail(ili_data)
+```
+
+```{r}
 
 # this is the data on ILI
 res <- pub_fluview(
@@ -22,7 +46,6 @@ res <- pub_fluview(
 ```
 
 ```{r}
-library(dplyr)
 
 #this is covid, flu, rsv 
 url <- paste0(

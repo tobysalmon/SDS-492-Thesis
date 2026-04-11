@@ -1,0 +1,44 @@
+
+model {
+  for(i in 1:tmax) {
+    flu[i]   ~ dnegbin(p1[i], r[1])
+    rsv[i]   ~ dpois(lambda2[i])
+    covid[i] ~ dnegbin(p3[i], r[3])
+    kinsa[i] ~ dlnorm(phi[i,4], tau_kinsa)
+
+    p1[i] <- r[1] / (r[1] + lambda1[i])
+    p3[i] <- r[3] / (r[3] + lambda3[i])
+
+    lambda1[i] <- exp(phi[i,1])
+    lambda2[i] <- exp(phi[i,2])
+    lambda3[i] <- exp(phi[i,3])
+    # lambda4 is the median of the lognormal (exp of meanlog)
+    lambda4[i] <- exp(phi[i,4])
+  }
+
+  # Seasonal AR(1) priors - same structure for all 4 series
+  for(k in 1:4) {
+    mu0[k] ~ dnorm(0, 1e-4)
+    beta_sin[k] ~ dnorm(0, 1e-4)
+    beta_cos[k] ~ dnorm(0, 1e-4)
+    prec.phi[k] ~ dgamma(0.01, 0.01)
+    rho1[k] ~ dunif(0, 1)
+
+    mu_t[1,k] <- mu0[k] + beta_sin[k] * sin52[1] + beta_cos[k] * cos52[1]
+    phi[1,k] ~ dnorm(mu_t[1,k], prec.phi[k] * (1 - pow(rho1[k], 2)))
+
+    for(i in 2:tmax) {
+      mu_t[i,k] <- mu0[k] + beta_sin[k] * sin52[i] + beta_cos[k] * cos52[i]
+      phi[i,k] ~ dnorm(mu_t[i,k] + rho1[k] * (phi[i-1,k] - mu_t[i-1,k]),
+                        prec.phi[k])
+    }
+  }
+
+  # Overdispersion priors for NegBin diseases (flu, covid). RSV is Poisson.
+  r[1] ~ dgamma(0.1, 0.1)
+  r[3] ~ dgamma(0.1, 0.1)
+
+  # Log-scale precision for the Kinsa lognormal
+  tau_kinsa ~ dgamma(0.01, 0.01)
+}
+

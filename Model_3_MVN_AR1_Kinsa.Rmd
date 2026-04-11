@@ -1,0 +1,349 @@
+---
+title: "Model 3 (Kinsa): Multivariate Normal AR(1) with Shared Rho"
+output: html_document
+date: "2026-04-08"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(rjags)
+library(tidyverse)
+library(coda)
+library(tidycensus)
+library(HDInterval)
+library(patchwork)
+library(scoringRules)
+```
+
+```{r}
+#census_api_key("81e4817f989c60bf268764565acf7fb7fbe0e2cf", install = TRUE)
+```
+
+## Load in the Data
+
+Mirrors `Model_3_MVN_AR1.Rmd` but uses Kinsa `percent_ill` in place of ILI.
+Two key differences from the original Model 3:
+
+1. The fourth series (Kinsa) is observed via a lognormal likelihood, not a
+   negative binomial.
+2. All four latent AR(1) processes share a single autocorrelation
+   `rho_shared`, instead of each having its own `rho1[k]`.
+
+```{r load_data}
+# -------- FILL IN: local path to your Kinsa CSV --------
+kinsa_path <- ""   # e.g. "/Users/tobysalmon/Desktop/SDS-492-Thesis/kinsa.csv"
+# -------------------------------------------------------
+
+kinsa_state <- "Michigan"
+
+data <- read_csv("https://raw.githubusercontent.com/PopHIVE/Ingest/main/data/respnet/standard/data.csv.gz")
+kinsa_raw <- read_csv(kinsa_path)
+
+fips <- "26" # Michigan
+
+data <- data %>%
+  filter(geography == fips , age == "Total")
+
+kinsa_data <- kinsa_raw %>%
+  filter(region_name == kinsa_state) %>%
+  mutate(time = as.Date(time)) %>%
+  select(time, percent_ill) %>%
+  arrange(time)
+
+state_pre <- get_estimates(
+  geography = "state",
+  state = fips,
+  product = "population",
+  vintage = 2019,
+  time_series = TRUE
+) |>
+  filter(variable == "POP") |>
+  mutate(year = 2009 + DATE) |>
+  filter(year %in% c(2018, 2019)) |>
+  arrange(year)|>
+  pull(value)
+
+state_pop <- get_estimates(
+  geography = "state",
+  state = fips,
+  product = "population",
+  vintage = 2025,
+  time_series = TRUE
+) |>
+  filter(variable == "POPESTIMATE", year %in% c(2020:2025)) %>%
+  arrange(year) %>%
+  pull(value)
+
+state_pop_estimates <- tibble(
+  year = 2018:2026,
+  population = c(
+    state_pre[1], state_pre[2],
+    state_pop[1], state_pop[2], state_pop[3],
+    state_pop[4], state_pop[5], state_pop[6], state_pop[6]
+  )
+)
+```
+
+## Merging Population Estimates with Data
+
+```{r population_merge}
+data_with_pop <- data %>%
+  mutate(year = year(time)) %>%
+  left_join(state_pop_estimates, by = "year")
+
+data_with_pop <- data_with_pop %>%
+  mutate(
+    covid_count = round(rate_covid * population / 100000),
+    flu_count   = round(rate_flu   * population / 100000),
+    rsv_count   = round(rate_rsv   * population / 100000)
+  )
+
+data_with_pop <- data_with_pop %>%
+  inner_join(kinsa_data, by = "time") %>%
+  arrange(time)
+
+stopifnot(all(data_with_pop$percent_ill > 0))
+```
+
+## Model 3 (Kinsa): MVN AR(1) with shared rho
+
+All four latent log-scale series evolve jointly via a multivariate normal
+AR(1) with a single shared autocorrelation. Innovations across diseases are
+correlated through a 4x4 covariance matrix.
+
+```{r jags-model}
+model_string <- "
+model {
+  for(i in 1:tmax) {
+    flu[i]   ~ dnegbin(p1[i], r[1])
+    rsv[i]   ~ dnegbin(p2[i], r[2])
+    covid[i] ~ dnegbin(p3[i], r[3])
+    kinsa[i] ~ dlnorm(phi[i,4], tau_kinsa)
+
+    p1[i] <- r[1] / (r[1] + lambda1[i])
+    p2[i] <- r[2] / (r[2] + lambda2[i])
+    p3[i] <- r[3] / (r[3] + lambda3[i])
+
+    lambda1[i] <- exp(phi[i,1])
+    lambda2[i] <- exp(phi[i,2])
+    lambda3[i] <- exp(phi[i,3])
+    lambda4[i] <- exp(phi[i,4])
+  }
+
+  # Seasonal means
+  for(k in 1:4) {
+    mu0[k] ~ dnorm(0, 1e-4)
+    beta_sin[k] ~ dnorm(0, 1e-4)
+    beta_cos[k] ~ dnorm(0, 1e-4)
+
+    for(i in 1:tmax) {
+      mu_t[i,k] <- mu0[k] + beta_sin[k] * sin52[i] + beta_cos[k] * cos52[i]
+    }
+  }
+
+  # Single shared AR(1) autocorrelation for all four series
+  rho_shared ~ dunif(0, 1)
+
+  # First time point - vague independent priors
+  for(k in 1:4) {
+    phi[1,k] ~ dnorm(mu_t[1,k], 0.01)
+  }
+
+  # Multivariate AR(1) for subsequent time points
+  for(i in 2:tmax) {
+    for(k in 1:4) {
+      mu_phi[i,k] <- mu_t[i,k] + rho_shared * (phi[i-1,k] - mu_t[i-1,k])
+    }
+    phi[i,1:4] ~ dmnorm(mu_phi[i,1:4], Omega[1:4,1:4])
+  }
+
+  # Precision / covariance
+  Omega[1:4,1:4] ~ dwish(R[1:4,1:4], 5)
+  Sigma[1:4,1:4] <- inverse(Omega[1:4,1:4])
+
+  # Count-process overdispersion
+  r[1] ~ dgamma(0.1, 0.1)
+  r[2] ~ dgamma(0.1, 0.1)
+  r[3] ~ dgamma(0.1, 0.1)
+
+  # Kinsa lognormal precision
+  tau_kinsa ~ dgamma(0.01, 0.01)
+}
+"
+
+writeLines(model_string, "model3_mvn_ar1_kinsa.jags")
+```
+
+## Prepare JAGS Data
+
+```{r jags-data}
+n_holdout_specific <- 1
+n_holdout_kinsa <- 0
+
+tmax <- nrow(data_with_pop)
+
+t_vec <- 1:tmax
+sin52 <- sin(2 * pi * t_vec / 52)
+cos52 <- cos(2 * pi * t_vec / 52)
+
+cat("Total observations:", tmax, "\n")
+cat("Flu/RSV/COVID: training on", tmax - n_holdout_specific, "| evaluating last", n_holdout_specific, "\n")
+cat("Kinsa: fully observed\n")
+
+actuals_holdout_specific <- data_with_pop %>%
+  tail(n_holdout_specific) %>%
+  select(time, flu_count, rsv_count, covid_count)
+
+print(actuals_holdout_specific)
+
+flu_data   <- data_with_pop$flu_count
+rsv_data   <- data_with_pop$rsv_count
+covid_data <- data_with_pop$covid_count
+kinsa_vec  <- data_with_pop$percent_ill
+
+flu_data[(tmax - n_holdout_specific + 1):tmax]   <- NA
+rsv_data[(tmax - n_holdout_specific + 1):tmax]   <- NA
+covid_data[(tmax - n_holdout_specific + 1):tmax] <- NA
+
+jags_data <- list(
+  flu = flu_data,
+  rsv = rsv_data,
+  covid = covid_data,
+  kinsa = kinsa_vec,
+  tmax = tmax,
+  sin52 = sin52,
+  cos52 = cos52,
+  R = diag(4)
+)
+```
+
+## Run JAGS Model
+
+```{r run-jags, message=FALSE, warning=FALSE}
+params <- c("mu0", "rho_shared", "r", "tau_kinsa",
+            "beta_sin", "beta_cos",
+            "Sigma",
+            "lambda1", "lambda2", "lambda3", "lambda4",
+            "flu", "rsv", "covid", "kinsa")
+
+inits <- list(
+  list(".RNG.seed" = 123, ".RNG.name" = "base::Wichmann-Hill"),
+  list(".RNG.seed" = 456, ".RNG.name" = "base::Wichmann-Hill"),
+  list(".RNG.seed" = 789, ".RNG.name" = "base::Wichmann-Hill")
+)
+
+jags_model <- jags.model(
+  file = "model3_mvn_ar1_kinsa.jags",
+  data = jags_data,
+  n.chains = 3,
+  n.adapt = 2000,
+  inits = inits
+)
+
+update(jags_model, n.iter = 20000)
+
+samples <- coda.samples(
+  model = jags_model,
+  variable.names = params,
+  n.iter = 30000,
+  thin = 15
+)
+```
+
+## Model Diagnostics
+
+```{r diagnostics}
+summary(samples[, c("mu0[1]", "mu0[2]", "mu0[3]", "mu0[4]",
+                    "rho_shared",
+                    "r[1]", "r[2]", "r[3]", "tau_kinsa",
+                    "beta_sin[1]", "beta_sin[2]", "beta_sin[3]", "beta_sin[4]",
+                    "beta_cos[1]", "beta_cos[2]", "beta_cos[3]", "beta_cos[4]")])
+
+cat("\n=== Estimated Covariance Matrix (Sigma) ===\n")
+cat("Order: Flu, RSV, COVID, Kinsa\n\n")
+summary(samples[, c("Sigma[1,1]", "Sigma[1,2]", "Sigma[1,3]", "Sigma[1,4]",
+                    "Sigma[2,2]", "Sigma[2,3]", "Sigma[2,4]",
+                    "Sigma[3,3]", "Sigma[3,4]",
+                    "Sigma[4,4]")])
+
+plot(samples[, "rho_shared"])
+plot(samples[, "mu0[1]"])
+plot(samples[, "mu0[2]"])
+plot(samples[, "mu0[3]"])
+plot(samples[, "mu0[4]"])
+
+plot(samples[, "r[1]"])
+plot(samples[, "r[2]"])
+plot(samples[, "r[3]"])
+plot(samples[, "tau_kinsa"])
+
+# Cross-series covariances with Kinsa (column 4)
+plot(samples[, "Sigma[1,4]"])  # Flu-Kinsa
+plot(samples[, "Sigma[2,4]"])  # RSV-Kinsa
+plot(samples[, "Sigma[3,4]"])  # COVID-Kinsa
+
+gelman.diag(samples[, c("mu0[1]", "mu0[2]", "mu0[3]", "mu0[4]",
+                        "rho_shared",
+                        "r[1]", "r[2]", "r[3]", "tau_kinsa",
+                        "Sigma[1,1]", "Sigma[2,2]", "Sigma[3,3]", "Sigma[4,4]",
+                        "Sigma[1,2]", "Sigma[1,3]", "Sigma[1,4]",
+                        "Sigma[2,3]", "Sigma[2,4]", "Sigma[3,4]")])
+```
+
+## Evaluation
+
+```{r evaluation, warning=FALSE}
+samples_combined <- do.call(rbind, samples)
+
+eval_results <- tibble(
+  week = 1:n_holdout_specific,
+  time = actuals_holdout_specific$time,
+  actual_flu   = actuals_holdout_specific$flu_count,
+  actual_rsv   = actuals_holdout_specific$rsv_count,
+  actual_covid = actuals_holdout_specific$covid_count
+)
+
+for (h in 1:n_holdout_specific) {
+  idx <- (tmax - n_holdout_specific) + h
+
+  flu_samples   <- samples_combined[, paste0("flu[", idx, "]")]
+  rsv_samples   <- samples_combined[, paste0("rsv[", idx, "]")]
+  covid_samples <- samples_combined[, paste0("covid[", idx, "]")]
+
+  eval_results$pred_flu_median[h]   <- median(flu_samples)
+  eval_results$pred_rsv_median[h]   <- median(rsv_samples)
+  eval_results$pred_covid_median[h] <- median(covid_samples)
+
+  eval_results$abs_error_flu[h]   <- abs(eval_results$actual_flu[h]   - median(flu_samples))
+  eval_results$abs_error_rsv[h]   <- abs(eval_results$actual_rsv[h]   - median(rsv_samples))
+  eval_results$abs_error_covid[h] <- abs(eval_results$actual_covid[h] - median(covid_samples))
+
+  eval_results$crps_flu[h]   <- crps_sample(y = eval_results$actual_flu[h],   dat = flu_samples)
+  eval_results$crps_rsv[h]   <- crps_sample(y = eval_results$actual_rsv[h],   dat = rsv_samples)
+  eval_results$crps_covid[h] <- crps_sample(y = eval_results$actual_covid[h], dat = covid_samples)
+}
+
+print(eval_results)
+```
+
+```{r summary-metrics}
+metrics <- tibble(
+  Disease = c("Flu", "RSV", "COVID"),
+  MAE = c(
+    mean(eval_results$abs_error_flu),
+    mean(eval_results$abs_error_rsv),
+    mean(eval_results$abs_error_covid)
+  ),
+  CRPS = c(
+    mean(eval_results$crps_flu),
+    mean(eval_results$crps_rsv),
+    mean(eval_results$crps_covid)
+  )
+)
+
+cat("=== Summary Metrics (Model 3 MVN-AR1 + Kinsa, shared rho) ===\n")
+print(metrics)
+```
