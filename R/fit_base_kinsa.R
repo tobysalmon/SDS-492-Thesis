@@ -24,11 +24,12 @@ suppressPackageStartupMessages({
 model {
   for(i in 1:tmax) {
     flu[i]   ~ dnegbin(p1[i], r[1])
-    rsv[i]   ~ dpois(lambda2[i])
+    rsv[i]   ~ dnegbin(p2[i], r[2])
     covid[i] ~ dnegbin(p3[i], r[3])
     kinsa[i] ~ dlnorm(phi[i,4], tau_kinsa)
 
     p1[i] <- r[1] / (r[1] + lambda1[i])
+    p2[i] <- r[2] / (r[2] + lambda2[i])
     p3[i] <- r[3] / (r[3] + lambda3[i])
 
     lambda1[i] <- exp(phi[i,1])
@@ -55,6 +56,7 @@ model {
   }
 
   r[1] ~ dgamma(0.1, 0.1)
+  r[2] ~ dgamma(0.1, 0.1)
   r[3] ~ dgamma(0.1, 0.1)
   tau_kinsa ~ dgamma(0.01, 0.01)
 }

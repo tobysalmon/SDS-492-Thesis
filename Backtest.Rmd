@@ -94,8 +94,7 @@ cat("Date range:", as.character(min(data_with_pop$time)), "to",
 
 ```{r backtest-config}
 # Number of rolling-origin as-of dates to evaluate.
-# Start small (5-10) while debugging, then bump to 20+ for the paper.
-n_as_of <- 10
+n_as_of <- 100
 
 max_time <- max(data_with_pop$time)
 as_of_dates <- seq(max_time - weeks(n_as_of - 1), max_time, by = "week")
@@ -103,9 +102,9 @@ as_of_dates <- seq(max_time - weeks(n_as_of - 1), max_time, by = "week")
 # Registry of all models to backtest
 model_registry <- list(
   base_kinsa = fit_base_kinsa,
-  m1_kinsa   = fit_m1_kinsa
-  #m2_kinsa   = fit_m2_kinsa,
-  #m3_kinsa   = fit_m3_kinsa
+  m1_kinsa   = fit_m1_kinsa,
+  m2_kinsa   = fit_m2_kinsa,
+  m3_kinsa   = fit_m3_kinsa
 )
 
 results_path <- "results/backtest_predictions.csv"
@@ -241,4 +240,394 @@ results %>%
   facet_wrap(~ disease, scales = "free_y") +
   labs(title = "Absolute error by week", x = NULL, y = "|truth - median|") +
   theme_minimal()
+```
+
+## Seasonal phase analysis
+
+Does one model perform better during the **rising** phase of an outbreak vs.
+the **peak** vs. the **falling** phase? We classify each target week by whether
+the truth is increasing, near peak, or decreasing relative to a local window.
+
+```{r seasonal-phase, fig.width=10, fig.height=6}
+# Classify each (disease, target_date) into a phase based on the
+# change in truth over a ±2-week window
+phase_labels <- results %>%
+  filter(model == model[1]) %>%   # one row per (disease, target_date)
+  select(disease, target_date, truth) %>%
+  group_by(disease) %>%
+  arrange(target_date) %>%
+  mutate(
+    truth_lag2  = lag(truth, 2),
+    truth_lead2 = lead(truth, 2),
+    delta_back  = truth - truth_lag2,
+    delta_fwd   = truth_lead2 - truth,
+    phase = case_when(
+      is.na(delta_back) | is.na(delta_fwd) ~ "edge",
+      delta_back > 0 & delta_fwd >= 0      ~ "rising",
+      delta_back >= 0 & delta_fwd < 0      ~ "peak",
+      delta_back < 0 & delta_fwd <= 0      ~ "falling",
+      delta_back < 0 & delta_fwd > 0       ~ "trough",
+      TRUE                                  ~ "stable"
+    )
+  ) %>%
+  ungroup() %>%
+  select(disease, target_date, phase)
+
+results_phase <- results %>%
+  left_join(phase_labels, by = c("disease", "target_date")) %>%
+  filter(phase != "edge")
+
+# CRPS by model x disease x phase
+phase_metrics <- results_phase %>%
+  group_by(model, disease, phase) %>%
+  summarise(
+    n    = n(),
+    CRPS = mean(crps),
+    MAE  = mean(abs(truth - median)),
+    .groups = "drop"
+  )
+
+cat("=== Metrics by seasonal phase ===\n")
+print(phase_metrics %>% arrange(disease, phase, CRPS))
+
+ggplot(results_phase, aes(x = model, y = crps, fill = model)) +
+  geom_boxplot(alpha = 0.6, outlier.alpha = 0.3) +
+  facet_grid(phase ~ disease, scales = "free_y") +
+  labs(title = "CRPS by disease and seasonal phase",
+       subtitle = "rising = counts increasing, peak = local max, falling = counts decreasing, trough = local min",
+       x = NULL, y = "CRPS") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Season-level analysis (by respiratory season)
+
+Group by respiratory season (Oct–Sep) to see whether model rankings are
+consistent across years or if one model shines in specific seasons.
+
+```{r by-season, fig.width=10, fig.height=6}
+results_season <- results %>%
+  mutate(
+    # Respiratory season: Oct 2024 - Sep 2025 = "2024-25"
+    resp_year = if_else(month(target_date) >= 10,
+                        year(target_date),
+                        year(target_date) - 1),
+    season = paste0(resp_year, "-", str_sub(as.character(resp_year + 1), 3, 4))
+  )
+
+season_metrics <- results_season %>%
+  group_by(model, disease, season) %>%
+  summarise(
+    n    = n(),
+    CRPS = mean(crps),
+    MAE  = mean(abs(truth - median)),
+    .groups = "drop"
+  )
+
+cat("=== Metrics by respiratory season ===\n")
+print(season_metrics %>% arrange(disease, season, CRPS))
+
+ggplot(season_metrics, aes(x = model, y = CRPS, fill = model)) +
+  geom_col(alpha = 0.7, position = "dodge") +
+  facet_grid(season ~ disease, scales = "free_y") +
+  labs(title = "Mean CRPS by model, disease, and respiratory season",
+       x = NULL, y = "Mean CRPS") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Relative skill score (vs. base model)
+
+A **skill score** measures how much better (or worse) each model is relative
+to the base model: `skill = 1 - CRPS_model / CRPS_base`. Positive = better
+than base, negative = worse.
+
+```{r skill-score, fig.width=9, fig.height=6}
+# Per-week skill relative to base_kinsa
+base_crps <- results %>%
+  filter(model == "base_kinsa") %>%
+  select(disease, target_date, crps_base = crps)
+
+skill_results <- results %>%
+  filter(model != "base_kinsa") %>%
+  left_join(base_crps, by = c("disease", "target_date")) %>%
+  mutate(skill = 1 - crps / crps_base)
+
+# Summary skill scores
+skill_summary <- skill_results %>%
+  group_by(model, disease) %>%
+  summarise(
+    mean_skill = mean(skill),
+    pct_better = mean(skill > 0) * 100,   # % of weeks this model beats base
+    .groups = "drop"
+  )
+
+cat("=== Skill scores relative to base_kinsa ===\n")
+cat("mean_skill > 0 = better than base on average\n")
+cat("pct_better = % of weeks where model beats base\n\n")
+print(skill_summary %>% arrange(disease, desc(mean_skill)))
+
+ggplot(skill_results, aes(x = target_date, y = skill, color = model)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
+  geom_line(linewidth = 0.7, alpha = 0.8) +
+  geom_point(size = 1.5, alpha = 0.6) +
+  facet_wrap(~ disease, ncol = 1, scales = "free_y") +
+  labs(title = "CRPS skill score relative to base model",
+       subtitle = "Above 0 = model outperforms base that week",
+       x = NULL, y = "Skill (1 - CRPS_model / CRPS_base)") +
+  theme_minimal()
+```
+
+## Paired Wilcoxon test: is any model significantly better?
+
+A formal paired test on per-week CRPS. Each week is a matched pair
+(same truth, same data vintage) — so a paired test is appropriate.
+
+```{r paired-tests}
+cat("=== Paired Wilcoxon signed-rank tests (CRPS) ===\n")
+cat("H0: model and base_kinsa have the same CRPS distribution\n")
+cat("H1: they differ (two-sided)\n\n")
+
+base_scores <- results %>%
+  filter(model == "base_kinsa") %>%
+  select(disease, target_date, crps_base = crps)
+
+for (mname in setdiff(unique(results$model), "base_kinsa")) {
+  cat("--- ", mname, " vs base_kinsa ---\n")
+  model_scores <- results %>%
+    filter(model == mname) %>%
+    select(disease, target_date, crps_model = crps) %>%
+    inner_join(base_scores, by = c("disease", "target_date"))
+
+  for (d in unique(model_scores$disease)) {
+    pair <- model_scores %>% filter(disease == d)
+    wt <- wilcox.test(pair$crps_model, pair$crps_base, paired = TRUE)
+    direction <- if (mean(pair$crps_model) < mean(pair$crps_base)) "BETTER" else "WORSE"
+    cat(sprintf("  %s: p=%.4f  mean diff=%.1f  (%s)\n",
+                d, wt$p.value,
+                mean(pair$crps_model - pair$crps_base),
+                direction))
+  }
+  cat("\n")
+}
+```
+
+## Calibration check
+
+Are the prediction intervals well-calibrated? For a perfectly calibrated
+model, X% of observations should fall within the X% interval.
+
+```{r calibration, fig.width=8, fig.height=5}
+calibration <- results %>%
+  group_by(model, disease) %>%
+  summarise(
+    `50% CI` = mean(truth >= q25  & truth <= q75)  * 100,
+    `95% CI` = mean(truth >= q025 & truth <= q975) * 100,
+    .groups = "drop"
+  ) %>%
+  pivot_longer(cols = c(`50% CI`, `95% CI`),
+               names_to = "interval", values_to = "coverage")
+
+ggplot(calibration, aes(x = model, y = coverage, fill = model)) +
+  geom_col(alpha = 0.7) +
+  geom_hline(aes(yintercept = as.numeric(str_extract(interval, "\\d+"))),
+             linetype = "dashed", color = "gray30") +
+  facet_grid(interval ~ disease, scales = "free_y") +
+  labs(title = "Empirical coverage vs. nominal",
+       subtitle = "Dashed line = target coverage",
+       x = NULL, y = "Coverage (%)") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+---
+
+# Paper-Ready Tables
+
+The tables below use `kableExtra` for LaTeX/HTML formatting. If you're
+writing in LaTeX, use `format = "latex"` below; for an HTML knit keep as-is.
+
+```{r table-setup, message=FALSE}
+library(kableExtra)
+
+# Nicer model labels for the paper
+model_labels <- c(
+  base_kinsa = "Base (Independent)",
+  m1_kinsa   = "M1 (Diseases → Kinsa)",
+  m2_kinsa   = "M2 (Kinsa → Diseases)",
+  m3_kinsa   = "M3 (MVN Shared ρ)"
+)
+
+results_labeled <- results %>%
+  mutate(
+    model = recode(model, !!!model_labels),
+    disease = recode(disease, flu = "Influenza", rsv = "RSV", covid = "COVID-19")
+  )
+```
+
+### Table 1: Overall nowcast accuracy by model and disease
+
+This is the main results table. Rows = models, columns grouped by disease,
+cells = MAE / CRPS / 95% coverage. Bold the best value per column.
+
+```{r table-1-overall}
+tbl1 <- results_labeled %>%
+  group_by(model, disease) %>%
+  summarise(
+    MAE       = mean(abs(truth - median)),
+    CRPS      = mean(crps),
+    `95% Cov` = mean(truth >= q025 & truth <= q975) * 100,
+    .groups = "drop"
+  ) %>%
+  mutate(across(c(MAE, CRPS), ~ round(.x, 1)),
+         `95% Cov` = round(`95% Cov`, 0))
+
+# Pivot wider so diseases are column groups
+tbl1_wide <- tbl1 %>%
+  pivot_wider(
+    names_from = disease,
+    values_from = c(MAE, CRPS, `95% Cov`),
+    names_glue = "{disease}_{.value}"
+  ) %>%
+  select(model,
+         starts_with("Influenza"), starts_with("RSV"), starts_with("COVID"))
+
+# Bold the best (lowest MAE/CRPS, closest-to-95 coverage) per column
+bold_best <- function(x, target = NA) {
+  if (is.na(target)) {
+    best <- which.min(x)
+  } else {
+    best <- which.min(abs(x - target))
+  }
+  out <- as.character(x)
+  out[best] <- cell_spec(out[best], bold = TRUE)
+  out
+}
+
+tbl1_fmt <- tbl1_wide %>%
+  mutate(
+    across(contains("MAE"),     ~ bold_best(.x)),
+    across(contains("CRPS"),    ~ bold_best(.x)),
+    across(contains("Cov"),     ~ bold_best(.x, target = 95))
+  )
+
+kbl(tbl1_fmt, escape = FALSE, align = "lrrrrrrrrr",
+    caption = "Table 1: Nowcast performance by model and disease (100-week rolling-origin backtest). Bold = best per column.") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
+  add_header_above(c(" " = 1,
+                     "Influenza" = 3, "RSV" = 3, "COVID-19" = 3))
+```
+
+### Table 2: CRPS skill scores relative to the base model
+
+Shows how much each structured model improves (or worsens) relative to the
+independent base. Includes % of weeks that beat base and a Wilcoxon p-value.
+
+```{r table-2-skill}
+base_crps_labeled <- results_labeled %>%
+  filter(model == "Base (Independent)") %>%
+  select(disease, target_date, crps_base = crps)
+
+skill_tbl <- results_labeled %>%
+  filter(model != "Base (Independent)") %>%
+  left_join(base_crps_labeled, by = c("disease", "target_date")) %>%
+  mutate(skill = 1 - crps / crps_base) %>%
+  group_by(model, disease) %>%
+  summarise(
+    `Mean Skill` = round(mean(skill), 3),
+    `% Weeks Better` = round(mean(skill > 0) * 100, 0),
+    `p-value` = {
+      wt <- wilcox.test(crps, crps_base, paired = TRUE)
+      format.pval(wt$p.value, digits = 3, eps = 0.001)
+    },
+    .groups = "drop"
+  )
+
+skill_tbl_wide <- skill_tbl %>%
+  pivot_wider(
+    names_from = disease,
+    values_from = c(`Mean Skill`, `% Weeks Better`, `p-value`),
+    names_glue = "{disease}_{.value}"
+  ) %>%
+  select(model,
+         starts_with("Influenza"), starts_with("RSV"), starts_with("COVID"))
+
+kbl(skill_tbl_wide, escape = FALSE, align = "lrrrrrrrrr",
+    caption = "Table 2: CRPS skill score relative to Base model. Skill > 0 = improvement. Wilcoxon paired signed-rank test.") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
+  add_header_above(c(" " = 1,
+                     "Influenza" = 3, "RSV" = 3, "COVID-19" = 3))
+```
+
+### Table 3: Performance by seasonal phase
+
+Shows which models excel during the rising, peak, falling, and trough
+phases of each disease's cycle.
+
+```{r table-3-phase}
+phase_labels_labeled <- phase_labels %>%
+  mutate(disease = recode(disease, flu = "Influenza", rsv = "RSV", covid = "COVID-19"))
+
+phase_tbl <- results_labeled %>%
+  left_join(phase_labels_labeled, by = c("disease", "target_date")) %>%
+  filter(!is.na(phase), phase != "edge") %>%
+  group_by(model, disease, phase) %>%
+  summarise(
+    n    = n(),
+    CRPS = round(mean(crps), 1),
+    .groups = "drop"
+  )
+
+# Pivot: rows = model x phase, columns = disease
+phase_tbl_wide <- phase_tbl %>%
+  select(-n) %>%
+  pivot_wider(names_from = disease, values_from = CRPS) %>%
+  arrange(phase, model)
+
+kbl(phase_tbl_wide, align = "llrrr",
+    caption = "Table 3: Mean CRPS by model and seasonal phase.") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
+  pack_rows(index = table(phase_tbl_wide$phase))
+```
+
+### Table 4: Performance by respiratory season
+
+```{r table-4-season}
+results_season_labeled <- results_labeled %>%
+  mutate(
+    resp_year = if_else(month(target_date) >= 10,
+                        year(target_date),
+                        year(target_date) - 1),
+    season = paste0(resp_year, "-", str_sub(as.character(resp_year + 1), 3, 4))
+  )
+
+season_tbl <- results_season_labeled %>%
+  group_by(model, disease, season) %>%
+  summarise(
+    n    = n(),
+    CRPS = round(mean(crps), 1),
+    MAE  = round(mean(abs(truth - median)), 1),
+    .groups = "drop"
+  )
+
+season_tbl_wide <- season_tbl %>%
+  select(-n) %>%
+  pivot_wider(
+    names_from = disease,
+    values_from = c(CRPS, MAE),
+    names_glue = "{disease}_{.value}"
+  ) %>%
+  arrange(season, model) %>%
+  select(season, model,
+         starts_with("Influenza"), starts_with("RSV"), starts_with("COVID"))
+
+kbl(season_tbl_wide, align = "llrrrrrr",
+    caption = "Table 4: Mean CRPS and MAE by model and respiratory season (Oct-Sep).") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
+  add_header_above(c(" " = 2,
+                     "Influenza" = 2, "RSV" = 2, "COVID-19" = 2)) %>%
+  pack_rows(index = table(season_tbl_wide$season))
 ```
