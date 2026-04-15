@@ -69,7 +69,7 @@ writeLines(.base_kinsa_model_string, .base_kinsa_model_file)
 
 fit_base_kinsa <- function(data_with_pop,
                            as_of_date,
-                           n_holdout_specific = 1,
+                           n_holdout_specific = 3,
                            n_adapt   = 1000,
                            n_burnin  = 10000,
                            n_iter    = 20000,
