@@ -1,0 +1,474 @@
+---
+title: "Paper Figures — Bayesian Respiratory Disease Nowcasting"
+output:
+  html_document:
+    fig_width: 10
+    fig_height: 7
+date: "2026-04-16"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE, message = FALSE, warning = FALSE,
+  fig.retina = 2, dpi = 300
+)
+```
+
+```{r load}
+library(tidyverse)
+library(kableExtra)
+library(patchwork)
+library(scales)
+
+# ---- Load cached backtest results ----
+results_raw <- read_csv("results/backtest_predictions.csv", show_col_types = FALSE) %>%
+  mutate(as_of = as.Date(as_of), target_date = as.Date(target_date))
+
+# ---- WIS scoring (same formula as Backtest.Rmd) ----
+compute_wis <- function(truth, q025, q25, median, q75, q975) {
+  IS <- function(y, l, u, alpha) {
+    (u - l) +
+      (2 / alpha) * pmax(l - y, 0) +
+      (2 / alpha) * pmax(y - u, 0)
+  }
+  is_95 <- IS(truth, q025, q975, alpha = 0.05)
+  is_50 <- IS(truth, q25,  q75,  alpha = 0.50)
+  mae   <- abs(truth - median)
+  (1 / 2.5) * (0.5 * mae + (0.05 / 2) * is_95 + (0.50 / 2) * is_50)
+}
+
+# ---- Build ensembles ----
+build_ensemble <- function(df, name, fn) {
+  df %>%
+    group_by(disease, as_of, target_date, horizon, truth) %>%
+    summarise(across(c(mean, median, q025, q25, q75, q975), fn),
+              .groups = "drop") %>%
+    mutate(model = name)
+}
+
+ens_mean   <- build_ensemble(results_raw, "ensemble_mean",   mean)
+ens_median <- build_ensemble(results_raw, "ensemble_median", median)
+
+results <- bind_rows(results_raw, ens_mean, ens_median) %>%
+  mutate(wis = compute_wis(truth, q025, q25, median, q75, q975))
+
+# ---- Labels and colors ----
+model_labels <- c(
+  base_kinsa      = "Base + Kinsa",
+  m1_kinsa        = "M1 (Diseases \u2192 Kinsa)",
+  m2_kinsa        = "M2 (Kinsa \u2192 Diseases)",
+  m3_kinsa        = "M3 MVN + Kinsa",
+  base_ili        = "Base + ILI",
+  m1_ili          = "M1 (Diseases \u2192 ILI)",
+  m2_ili          = "M2 (ILI \u2192 Diseases)",
+  m3_ili          = "M3 MVN + ILI",
+  ensemble_mean   = "Ensemble (Mean)",
+  ensemble_median = "Ensemble (Median)"
+)
+
+disease_labels <- c(flu = "Influenza", rsv = "RSV", covid = "COVID-19")
+
+# 10 distinguishable colors: Kinsa family = blues/teals, ILI family = oranges/reds,
+# ensembles = purples
+model_colors <- c(
+  "Base + Kinsa"             = "#4393C3",
+  "M1 (Diseases \u2192 Kinsa)"  = "#2166AC",
+  "M2 (Kinsa \u2192 Diseases)"  = "#053061",
+  "M3 MVN + Kinsa"           = "#92C5DE",
+  "Base + ILI"               = "#F4A582",
+  "M1 (Diseases \u2192 ILI)"    = "#D6604D",
+  "M2 (ILI \u2192 Diseases)"    = "#B2182B",
+  "M3 MVN + ILI"             = "#FDDBC7",
+  "Ensemble (Mean)"          = "#7B3294",
+  "Ensemble (Median)"        = "#C2A5CF"
+)
+
+results <- results %>%
+  mutate(
+    model   = recode(model, !!!model_labels),
+    disease = recode(disease, !!!disease_labels),
+    model   = factor(model, levels = model_labels)
+  )
+
+# Common theme
+theme_paper <- theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "bottom",
+    legend.title    = element_blank(),
+    strip.text      = element_text(face = "bold", size = 12),
+    panel.grid.minor = element_blank(),
+    plot.title       = element_text(face = "bold", size = 14),
+    plot.subtitle    = element_text(color = "gray30", size = 11)
+  )
+```
+
+# Figure 1: Overall WIS by Model and Disease
+
+```{r fig1-overall-wis, fig.width=10, fig.height=6}
+overall <- results %>%
+  group_by(model, disease) %>%
+  summarise(WIS = mean(wis), .groups = "drop")
+
+ggplot(overall, aes(x = reorder(model, WIS), y = WIS, fill = model)) +
+  geom_col(alpha = 0.85, width = 0.7) +
+  facet_wrap(~ disease, scales = "free_x") +
+  coord_flip() +
+  scale_fill_manual(values = model_colors, guide = "none") +
+  labs(title = "Mean Weighted Interval Score by model and disease",
+       subtitle = "100-week rolling-origin backtest | lower is better",
+       x = NULL, y = "Mean WIS") +
+  theme_paper
+```
+
+# Figure 2: Nowcast Traces (Horizon 0 Only)
+
+One panel per disease showing each model's median prediction vs truth,
+restricted to the nowcast horizon (the real-world use case).
+
+```{r fig2-traces, fig.width=11, fig.height=10}
+h0 <- results %>% filter(horizon == 0)
+
+# Only show a subset of models to avoid overplotting — the 4 Kinsa + ensemble
+trace_models <- c("Base + Kinsa", "M1 (Diseases \u2192 Kinsa)",
+                   "M2 (Kinsa \u2192 Diseases)", "M3 MVN + Kinsa",
+                   "Ensemble (Median)")
+
+p_traces <- h0 %>%
+  filter(model %in% trace_models) %>%
+  ggplot(aes(x = target_date)) +
+  geom_point(aes(y = truth), color = "black", size = 1.5, alpha = 0.6) +
+  geom_ribbon(aes(ymin = q25, ymax = q75, fill = model), alpha = 0.15) +
+  geom_line(aes(y = median, color = model), linewidth = 0.7) +
+  facet_wrap(~ disease, ncol = 1, scales = "free_y") +
+  scale_color_manual(values = model_colors) +
+  scale_fill_manual(values = model_colors) +
+  labs(title = "Nowcast predictions vs. observed counts (horizon 0)",
+       subtitle = "Points = truth, lines = posterior median, ribbon = 50% CI",
+       x = NULL, y = "Count") +
+  theme_paper +
+  guides(fill = "none",
+         color = guide_legend(nrow = 2, override.aes = list(linewidth = 1.5)))
+
+p_traces
+```
+
+# Figure 3: WIS by Horizon
+
+Shows how prediction quality degrades as you move from 2-weeks-back
+(easiest) to the nowcast week (hardest).
+
+```{r fig3-horizon, fig.width=10, fig.height=6}
+horizon_summary <- results %>%
+  group_by(model, disease, horizon) %>%
+  summarise(WIS = mean(wis), .groups = "drop") %>%
+  mutate(horizon_label = factor(
+    horizon,
+    levels = c(-2, -1, 0),
+    labels = c("-2\n(2wk back)", "-1\n(1wk back)", "0\n(nowcast)")
+  ))
+
+ggplot(horizon_summary,
+       aes(x = horizon_label, y = WIS, color = model, group = model)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2.5) +
+  facet_wrap(~ disease, scales = "free_y") +
+  scale_color_manual(values = model_colors) +
+  labs(title = "Mean WIS by nowcast horizon",
+       subtitle = "Horizon 0 = target week (hardest); -2 = two weeks back (easiest)",
+       x = "Horizon", y = "Mean WIS") +
+  theme_paper +
+  guides(color = guide_legend(nrow = 2, override.aes = list(linewidth = 1.5)))
+```
+
+# Figure 4: Kinsa vs ILI Signal Comparison
+
+Direct comparison of the two signal families. For each model structure
+(Base, M1, M2, M3), plot the Kinsa version's WIS against the ILI version's.
+
+```{r fig4-kinsa-vs-ili, fig.width=9, fig.height=6}
+# Map each model to its structure and signal family
+signal_comparison <- results %>%
+  filter(!str_detect(model, "Ensemble")) %>%
+  mutate(
+    structure = case_when(
+      str_detect(model, "Base")  ~ "Base",
+      str_detect(model, "M1")    ~ "M1",
+      str_detect(model, "M2")    ~ "M2",
+      str_detect(model, "M3")    ~ "M3"
+    ),
+    signal = if_else(str_detect(model, "Kinsa"), "Kinsa", "ILI")
+  ) %>%
+  group_by(structure, signal, disease) %>%
+  summarise(WIS = mean(wis), .groups = "drop") %>%
+  pivot_wider(names_from = signal, values_from = WIS)
+
+ggplot(signal_comparison, aes(x = ILI, y = Kinsa, shape = structure, color = structure)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+  geom_point(size = 4, stroke = 1.2) +
+  facet_wrap(~ disease, scales = "free") +
+  scale_shape_manual(values = c(Base = 16, M1 = 17, M2 = 15, M3 = 18)) +
+  scale_color_brewer(palette = "Dark2") +
+  labs(title = "Kinsa vs. ILI signal: Mean WIS comparison",
+       subtitle = "Points below the diagonal = Kinsa outperforms ILI",
+       x = "Mean WIS (ILI version)", y = "Mean WIS (Kinsa version)",
+       shape = "Model structure", color = "Model structure") +
+  theme_paper +
+  theme(legend.position = "right")
+```
+
+# Figure 5: Seasonal Phase Performance
+
+How models perform during rising, peak, falling, and trough phases.
+
+```{r fig5-phase, fig.width=10, fig.height=7}
+# Classify phases from truth trajectory
+phase_labels <- results %>%
+  filter(model == levels(results$model)[1]) %>%
+  select(disease, target_date, truth) %>%
+  distinct() %>%
+  group_by(disease) %>%
+  arrange(target_date) %>%
+  mutate(
+    delta_back  = truth - lag(truth, 2),
+    delta_fwd   = lead(truth, 2) - truth,
+    phase = case_when(
+      is.na(delta_back) | is.na(delta_fwd) ~ NA_character_,
+      delta_back > 0 & delta_fwd >= 0      ~ "Rising",
+      delta_back >= 0 & delta_fwd < 0      ~ "Peak",
+      delta_back < 0 & delta_fwd <= 0      ~ "Falling",
+      delta_back < 0 & delta_fwd > 0       ~ "Trough",
+      TRUE                                  ~ "Stable"
+    )
+  ) %>%
+  ungroup() %>%
+  select(disease, target_date, phase) %>%
+  filter(!is.na(phase))
+
+phase_wis <- results %>%
+  inner_join(phase_labels, by = c("disease", "target_date")) %>%
+  group_by(model, disease, phase) %>%
+  summarise(WIS = mean(wis), n = n(), .groups = "drop") %>%
+  mutate(phase = factor(phase, levels = c("Rising", "Peak", "Falling", "Trough", "Stable")))
+
+# Show only the main models (drop base_ili since ≈ base_kinsa)
+phase_models <- c("Base + Kinsa",
+                   "M1 (Diseases \u2192 Kinsa)", "M2 (Kinsa \u2192 Diseases)",
+                   "M3 MVN + Kinsa", "M3 MVN + ILI",
+                   "Ensemble (Median)")
+
+ggplot(phase_wis %>% filter(model %in% phase_models),
+       aes(x = phase, y = WIS, fill = model)) +
+  geom_col(position = position_dodge(width = 0.8), alpha = 0.85, width = 0.7) +
+  facet_wrap(~ disease, scales = "free_y") +
+  scale_fill_manual(values = model_colors) +
+  labs(title = "Mean WIS by seasonal phase",
+       subtitle = "Rising = counts increasing, Peak = local max, Falling = decreasing, Trough = local min",
+       x = NULL, y = "Mean WIS") +
+  theme_paper +
+  guides(fill = guide_legend(nrow = 2))
+```
+
+# Figure 6: Calibration
+
+Are prediction intervals well-calibrated? Bars show empirical coverage
+vs. nominal levels (dashed lines).
+
+```{r fig6-calibration, fig.width=10, fig.height=5}
+cal_models <- c("Base + Kinsa", "M1 (Diseases \u2192 Kinsa)",
+                "M3 MVN + Kinsa", "M3 MVN + ILI",
+                "Ensemble (Median)")
+
+calibration <- results %>%
+  filter(model %in% cal_models) %>%
+  group_by(model, disease) %>%
+  summarise(
+    `50%` = mean(truth >= q25  & truth <= q75)  * 100,
+    `95%` = mean(truth >= q025 & truth <= q975) * 100,
+    .groups = "drop"
+  ) %>%
+  pivot_longer(cols = c(`50%`, `95%`),
+               names_to = "interval", values_to = "coverage") %>%
+  mutate(nominal = as.numeric(str_extract(interval, "\\d+")))
+
+ggplot(calibration, aes(x = model, y = coverage, fill = model)) +
+  geom_col(alpha = 0.8, width = 0.7) +
+  geom_hline(aes(yintercept = nominal), linetype = "dashed", color = "gray30") +
+  facet_grid(interval ~ disease) +
+  scale_fill_manual(values = model_colors, guide = "none") +
+  scale_y_continuous(limits = c(0, 100)) +
+  labs(title = "Empirical coverage vs. nominal prediction intervals",
+       subtitle = "Dashed line = target | bars above = conservative, below = overconfident",
+       x = NULL, y = "Coverage (%)") +
+  theme_paper +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1, size = 10))
+```
+
+---
+
+# Tables
+
+```{r table-helpers}
+# Shared WIS-based metrics for tables
+metrics_all <- results %>%
+  group_by(model, disease) %>%
+  summarise(
+    n        = n(),
+    MAE      = mean(abs(truth - median)),
+    WIS      = mean(wis),
+    cover_50 = mean(truth >= q25  & truth <= q75)  * 100,
+    cover_95 = mean(truth >= q025 & truth <= q975) * 100,
+    .groups  = "drop"
+  )
+```
+
+## Table 1: Overall Nowcast Accuracy
+
+```{r table-1}
+tbl1 <- metrics_all %>%
+  mutate(across(c(MAE, WIS), ~ round(.x, 1)),
+         cover_95 = round(cover_95, 0)) %>%
+  select(model, disease, MAE, WIS, `95% Cov` = cover_95)
+
+tbl1_wide <- tbl1 %>%
+  pivot_wider(names_from = disease,
+              values_from = c(MAE, WIS, `95% Cov`),
+              names_glue = "{disease}_{.value}") %>%
+  select(model, starts_with("Influenza"), starts_with("RSV"), starts_with("COVID"))
+
+# Bold best per column
+bold_best <- function(x, target = NA) {
+  best <- if (is.na(target)) which.min(x) else which.min(abs(x - target))
+  out <- as.character(x)
+  out[best] <- cell_spec(out[best], bold = TRUE)
+  out
+}
+
+# Apply bolding column-by-column to avoid earlier columns becoming character
+# before later columns are processed
+tbl1_fmt <- tbl1_wide
+for (col in names(tbl1_fmt)[-1]) {
+  target <- if (grepl("Cov", col)) 95 else NA
+  tbl1_fmt[[col]] <- bold_best(tbl1_fmt[[col]], target = target)
+}
+
+kbl(tbl1_fmt, escape = FALSE, align = c("l", rep("r", 9)),
+    caption = "Table 1: Nowcast performance (100-week rolling-origin backtest). Bold = best per column.") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE,
+                font_size = 12) %>%
+  add_header_above(c(" " = 1, "Influenza" = 3, "RSV" = 3, "COVID-19" = 3))
+```
+
+## Table 2: Skill Scores vs. Base
+
+```{r table-2}
+base_wis <- results %>%
+  filter(model == "Base + Kinsa") %>%
+  select(disease, target_date, horizon, wis_base = wis)
+
+skill_tbl <- results %>%
+  filter(!model %in% c("Base + Kinsa", "Base + ILI")) %>%
+  inner_join(base_wis, by = c("disease", "target_date", "horizon")) %>%
+  mutate(skill = 1 - wis / wis_base) %>%
+  group_by(model, disease) %>%
+  summarise(
+    `Skill` = round(mean(skill), 3),
+    `% Better` = round(mean(skill > 0) * 100, 0),
+    `p` = {
+      wt <- wilcox.test(wis, wis_base, paired = TRUE)
+      format.pval(wt$p.value, digits = 3, eps = 0.001)
+    },
+    .groups = "drop"
+  )
+
+skill_wide <- skill_tbl %>%
+  pivot_wider(names_from = disease,
+              values_from = c(Skill, `% Better`, p),
+              names_glue = "{disease}_{.value}") %>%
+  select(model, starts_with("Influenza"), starts_with("RSV"), starts_with("COVID"))
+
+kbl(skill_wide, escape = FALSE, align = c("l", rep("r", 9)),
+    caption = "Table 2: WIS skill score vs. Base + Kinsa. Skill > 0 = improvement. Paired Wilcoxon test.") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE,
+                font_size = 12) %>%
+  add_header_above(c(" " = 1, "Influenza" = 3, "RSV" = 3, "COVID-19" = 3))
+```
+
+## Table 3: Performance by Horizon
+
+```{r table-3}
+horizon_tbl <- results %>%
+  group_by(model, disease, horizon) %>%
+  summarise(WIS = round(mean(wis), 1), .groups = "drop") %>%
+  mutate(horizon_label = factor(
+    horizon, levels = c(-2, -1, 0),
+    labels = c("Horizon -2 (2wk back)", "Horizon -1 (1wk back)", "Horizon 0 (nowcast)")
+  ))
+
+horizon_wide <- horizon_tbl %>%
+  pivot_wider(names_from = disease, values_from = WIS) %>%
+  arrange(horizon, model) %>%
+  select(horizon_label, model, Influenza, RSV, `COVID-19`)
+
+kbl(horizon_wide %>% select(-horizon_label),
+    align = c("l", rep("r", 3)),
+    caption = "Table 3: Mean WIS by model and horizon. Horizon 0 is the nowcast week (hardest).") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE,
+                font_size = 12) %>%
+  pack_rows(index = table(horizon_wide$horizon_label))
+```
+
+## Table 4: CRPS Comparison (Individual Models Only)
+
+Sample-based CRPS computed from full posterior draws (~6,000 samples per
+fit). Ensembles excluded — they do not have posterior samples, only
+quantiles. Kinsa and ILI model families shown side by side for direct
+comparison.
+
+```{r table-4-crps}
+# Use results_raw (pre-ensemble) which has the original sample-based crps
+# Apply the same model/disease labels
+crps_tbl <- results_raw %>%
+  mutate(
+    model   = recode(model, !!!model_labels),
+    disease = recode(disease, !!!disease_labels)
+  ) %>%
+  filter(!str_detect(model, "Ensemble"), horizon == 0) %>%
+  group_by(model, disease) %>%
+  summarise(CRPS = round(mean(crps), 1), .groups = "drop") %>%
+  pivot_wider(names_from = disease, values_from = CRPS) %>%
+  mutate(
+    family    = if_else(str_detect(model, "Kinsa"), "Kinsa", "ILI"),
+    structure = case_when(
+      str_detect(model, "Base") ~ "Base",
+      str_detect(model, "M1")   ~ "M1",
+      str_detect(model, "M2")   ~ "M2",
+      str_detect(model, "M3")   ~ "M3"
+    )
+  ) %>%
+  arrange(structure, family) %>%
+  select(structure, family, model, Influenza, RSV, `COVID-19`)
+
+# Bold lowest CRPS per (disease, structure) group
+crps_fmt <- crps_tbl
+for (col in c("Influenza", "RSV", "COVID-19")) {
+  vals <- crps_fmt[[col]]
+  for (struct in unique(crps_fmt$structure)) {
+    idx <- which(crps_fmt$structure == struct)
+    best <- idx[which.min(vals[idx])]
+    crps_fmt[[col]][best] <- cell_spec(as.character(vals[best]), bold = TRUE)
+    crps_fmt[[col]][setdiff(idx, best)] <- as.character(vals[setdiff(idx, best)])
+  }
+}
+
+kbl(crps_fmt %>% select(-structure),
+    escape = FALSE, align = c("l", "l", "r", "r", "r"),
+    caption = paste(
+      "Table 4: Mean CRPS at horizon 0 (nowcast week) by model and disease",
+      "(sample-based, from full posterior draws).",
+      "Bold = best within each model structure."
+    )) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE,
+                font_size = 12) %>%
+  pack_rows(index = table(crps_fmt$structure)) %>%
+  add_header_above(c(" " = 2, "Mean CRPS" = 3))
+```
