@@ -472,6 +472,93 @@ for (mname in setdiff(unique(results$model), "base_kinsa")) {
 }
 ```
 
+## Performance by horizon
+
+Each fit produces predictions at 3 horizons: 0 (nowcast, no RESP-NET data
+for the target week yet), -1 (one week of data, partially matured), and
+-2 (two weeks of data, nearly matured). Horizon 0 is the hardest.
+
+```{r by-horizon, fig.width=10, fig.height=6}
+horizon_metrics <- results %>%
+  group_by(model, disease, horizon) %>%
+  summarise(
+    n        = n(),
+    MAE      = mean(abs(truth - median)),
+    CRPS     = mean(crps),
+    cover_95 = mean(truth >= q025 & truth <= q975) * 100,
+    .groups = "drop"
+  ) %>%
+  arrange(disease, horizon, CRPS)
+
+cat("=== Metrics by horizon ===\n")
+cat("horizon 0  = nowcast week (hardest; no RESP-NET data for target yet)\n")
+cat("horizon -1 = 1 week back (partially matured)\n")
+cat("horizon -2 = 2 weeks back (nearly matured; easiest)\n\n")
+print(horizon_metrics)
+
+# CRPS by horizon, one panel per disease
+ggplot(horizon_metrics,
+       aes(x = factor(horizon), y = CRPS, color = model, group = model)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2.5) +
+  facet_wrap(~ disease, scales = "free_y") +
+  labs(title = "Mean CRPS by horizon",
+       subtitle = "horizon 0 = nowcast (hardest), -2 = 2 weeks back (easiest)",
+       x = "Horizon (weeks)", y = "Mean CRPS") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Per-week CRPS distribution by horizon
+ggplot(results, aes(x = factor(horizon), y = crps, fill = model)) +
+  geom_boxplot(alpha = 0.6, outlier.alpha = 0.3) +
+  facet_wrap(~ disease, scales = "free_y") +
+  labs(title = "CRPS distribution by horizon",
+       x = "Horizon (weeks)", y = "CRPS") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+### Paired tests at horizon 0 only (nowcast)
+
+The nowcast horizon is the headline use case. Isolate it for cleaner
+statistical comparisons vs. the base models.
+
+```{r horizon-0-tests}
+cat("=== Horizon-0 (nowcast) paired Wilcoxon tests ===\n\n")
+
+for (base_model in c("base_kinsa", "base_ili")) {
+  cat("--- vs", base_model, "---\n")
+  base_h0 <- results %>%
+    filter(model == base_model, horizon == 0) %>%
+    select(disease, target_date, crps_base = crps)
+
+  # Compare only models of the same family (Kinsa-vs-Kinsa or ILI-vs-ILI)
+  family <- if (base_model == "base_kinsa") "_kinsa" else "_ili"
+  peers <- setdiff(
+    grep(family, unique(results$model), value = TRUE),
+    base_model
+  )
+
+  for (mname in peers) {
+    pair <- results %>%
+      filter(model == mname, horizon == 0) %>%
+      select(disease, target_date, crps_model = crps) %>%
+      inner_join(base_h0, by = c("disease", "target_date"))
+
+    for (d in unique(pair$disease)) {
+      pd <- pair %>% filter(disease == d)
+      if (nrow(pd) < 3) next
+      wt <- wilcox.test(pd$crps_model, pd$crps_base, paired = TRUE)
+      dir <- if (mean(pd$crps_model) < mean(pd$crps_base)) "BETTER" else "WORSE"
+      cat(sprintf("  %-12s %-6s p=%.4f  mean diff=%+.1f  (%s)\n",
+                  mname, d, wt$p.value,
+                  mean(pd$crps_model - pd$crps_base), dir))
+    }
+  }
+  cat("\n")
+}
+```
+
 ## Calibration check
 
 Are the prediction intervals well-calibrated? For a perfectly calibrated
@@ -589,13 +676,26 @@ Shows how much each structured model improves (or worsens) relative to the
 independent base. Includes % of weeks that beat base and a Wilcoxon p-value.
 
 ```{r table-2-skill}
-base_crps_labeled <- results_labeled %>%
-  filter(model == "Base (Independent)") %>%
+# Each model is compared against its own family's base: Kinsa models vs
+# "Base + Kinsa", ILI models vs "Base + ILI".
+base_kinsa_crps <- results_labeled %>%
+  filter(model == "Base + Kinsa") %>%
+  select(disease, target_date, crps_base = crps)
+
+base_ili_crps <- results_labeled %>%
+  filter(model == "Base + ILI") %>%
   select(disease, target_date, crps_base = crps)
 
 skill_tbl <- results_labeled %>%
-  filter(model != "Base (Independent)") %>%
-  left_join(base_crps_labeled, by = c("disease", "target_date")) %>%
+  filter(!model %in% c("Base + Kinsa", "Base + ILI")) %>%
+  mutate(family = if_else(str_detect(as.character(model), "Kinsa"), "kinsa", "ili")) %>%
+  left_join(
+    bind_rows(
+      base_kinsa_crps %>% mutate(family = "kinsa"),
+      base_ili_crps   %>% mutate(family = "ili")
+    ),
+    by = c("disease", "target_date", "family")
+  ) %>%
   mutate(skill = 1 - crps / crps_base) %>%
   group_by(model, disease) %>%
   summarise(
@@ -653,6 +753,37 @@ kbl(phase_tbl_wide, align = "llrrr",
     caption = "Table 3: Mean CRPS by model and seasonal phase.") %>%
   kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
   pack_rows(index = table(phase_tbl_wide$phase))
+```
+
+### Table 5: Performance by horizon
+
+```{r table-5-horizon}
+horizon_tbl <- results_labeled %>%
+  group_by(model, disease, horizon) %>%
+  summarise(
+    CRPS = round(mean(crps), 1),
+    .groups = "drop"
+  )
+
+horizon_tbl_wide <- horizon_tbl %>%
+  pivot_wider(
+    names_from = disease,
+    values_from = CRPS
+  ) %>%
+  mutate(horizon_label = case_when(
+    horizon == 0  ~ "0 (nowcast)",
+    horizon == -1 ~ "-1 (1wk back)",
+    horizon == -2 ~ "-2 (2wk back)",
+    TRUE          ~ as.character(horizon)
+  )) %>%
+  arrange(horizon, model) %>%
+  select(horizon_label, model, Influenza, RSV, `COVID-19`)
+
+kbl(horizon_tbl_wide %>% select(-horizon_label),
+    align = "lrrr",
+    caption = "Table 5: Mean CRPS by model and nowcast horizon. Horizon 0 is the hardest (no RESP-NET data yet); -2 is easiest (two weeks of partially matured data).") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
+  pack_rows(index = table(horizon_tbl_wide$horizon_label))
 ```
 
 ### Table 4: Performance by respiratory season
