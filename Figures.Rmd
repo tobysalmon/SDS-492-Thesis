@@ -102,6 +102,211 @@ theme_paper <- theme_minimal(base_size = 13) +
   )
 ```
 
+# Descriptive Signal Analysis
+
+```{r raw-data-load, message=FALSE, warning=FALSE}
+library(tidycensus)
+
+kinsa_path  <- "/Users/tobysalmon/Desktop/kinsa_michigan_weekly.csv"
+fips        <- "26"
+kinsa_state <- "Michigan"
+
+resp_raw <- read_csv(
+  "https://raw.githubusercontent.com/PopHIVE/Ingest/main/data/respnet/standard/data.csv.gz",
+  show_col_types = FALSE
+) %>% filter(geography == fips, age == "Total")
+
+ili_raw <- read_csv(
+  "https://raw.githubusercontent.com/PopHIVE/Ingest/main/data/delphi_ili_fluview/standard/data.csv.gz",
+  show_col_types = FALSE
+) %>%
+  filter(geography == fips) %>%
+  select(time, ili = delphi_fluview_num_ili)
+
+kinsa_raw <- read_csv(kinsa_path, show_col_types = FALSE) %>%
+  filter(region_name == kinsa_state) %>%
+  mutate(time = as.Date(time)) %>%
+  select(time, kinsa = percent_ill)
+
+# Population (same vintage as Backtest.Rmd)
+state_pre <- get_estimates(geography = "state", state = fips,
+  product = "population", vintage = 2019, time_series = TRUE) |>
+  filter(variable == "POP") |> mutate(year = 2009 + DATE) |>
+  filter(year %in% c(2018, 2019)) |> arrange(year) |> pull(value)
+state_pop <- get_estimates(geography = "state", state = fips,
+  product = "population", vintage = 2025, time_series = TRUE) |>
+  filter(variable == "POPESTIMATE", year %in% 2020:2025) |>
+  arrange(year) |> pull(value)
+pop_tbl <- tibble(year = 2018:2026,
+                  population = c(state_pre, state_pop, state_pop[6]))
+
+signal_data <- resp_raw %>%
+  mutate(year = year(time)) %>%
+  left_join(pop_tbl, by = "year") %>%
+  mutate(
+    flu   = round(rate_flu   * population / 100000),
+    rsv   = round(rate_rsv   * population / 100000),
+    covid = round(rate_covid * population / 100000)
+  ) %>%
+  select(time, flu, rsv, covid) %>%
+  inner_join(kinsa_raw, by = "time") %>%
+  left_join(ili_raw,   by = "time") %>%
+  arrange(time)
+
+# Illustrative "as of" date — early Jan 2025 (near peak of 2024-25 flu season).
+# Change this to explore a different point in time.
+T_date <- as.Date("2025-01-04")
+```
+
+## Figure D1: Signal Correlation Matrix
+
+Pearson correlations on log-transformed weekly values. Shows how strongly
+each surveillance signal co-moves with the disease-specific RESP-NET counts.
+
+```{r fig-d1-correlation, fig.width=7, fig.height=6}
+cor_df <- signal_data %>%
+  select(Kinsa = kinsa, ILI = ili, Influenza = flu, RSV = rsv, `COVID-19` = covid) %>%
+  filter(complete.cases(.)) %>%
+  mutate(across(everything(), log1p))
+
+cor_mat <- cor(cor_df, use = "complete.obs")
+
+cor_long <- cor_mat %>%
+  as.data.frame() %>%
+  rownames_to_column("Var1") %>%
+  pivot_longer(-Var1, names_to = "Var2", values_to = "r") %>%
+  mutate(
+    Var1 = factor(Var1, levels = colnames(cor_mat)),
+    Var2 = factor(Var2, levels = rev(colnames(cor_mat)))
+  )
+
+ggplot(cor_long, aes(x = Var1, y = Var2, fill = r)) +
+  geom_tile(color = "white", linewidth = 0.8) +
+  geom_text(aes(label = sprintf("%.2f", r)), size = 4.5, fontface = "bold") +
+  scale_fill_gradient2(low = "#053061", mid = "white", high = "#67001F",
+                       midpoint = 0, limits = c(-1, 1), name = "r") +
+  labs(
+    title = "Signal correlation matrix",
+    subtitle = "Pearson r on log\u2081\u208a(x) weekly values \u2014 Michigan, 2019\u20132026"
+  ) +
+  theme_paper +
+  theme(axis.text = element_text(size = 12),
+        legend.position = "right",
+        panel.grid = element_blank())
+```
+
+## Figure D2: Reporting Availability as of `r T_date`
+
+All five signals shown together, each in its own facet. Solid lines =
+reliable data as of T. Dashed lines = data that exists but has not yet
+matured. Shaded region = the unreliable window for that signal.
+
+```{r fig-d2-delay, fig.width=10, fig.height=11}
+window_weeks <- 30
+plot_start   <- T_date - weeks(window_weeks)
+
+# Cutoff = last date considered reliable for each signal as of T_date
+signal_cutoffs <- c(
+  Kinsa      = T_date,              # real-time, no lag
+  ILI        = T_date - days(7),   # 1-week reporting lag
+  Influenza  = T_date - days(21),  # RESP-NET: ~3-week maturation
+  RSV        = T_date - days(21),
+  `COVID-19` = T_date - days(21)
+)
+
+signal_order <- names(signal_cutoffs)
+
+# Build long data for all 5 signals
+all_signals_long <- signal_data %>%
+  filter(time >= plot_start, time <= T_date) %>%
+  select(time,
+         Kinsa = kinsa, ILI = ili,
+         Influenza = flu, RSV = rsv, `COVID-19` = covid) %>%
+  pivot_longer(-time, names_to = "signal", values_to = "value") %>%
+  mutate(signal = factor(signal, levels = signal_order)) %>%
+  left_join(
+    tibble(signal = factor(signal_order, levels = signal_order),
+           cutoff = as.Date(signal_cutoffs)),
+    by = "signal"
+  ) %>%
+  mutate(reliable = time <= cutoff) %>%
+  group_by(signal) %>%
+  mutate(value_norm = (value - min(value, na.rm = TRUE)) /
+                      (max(value, na.rm = TRUE) - min(value, na.rm = TRUE))) %>%
+  ungroup()
+
+# Shading rectangles — one per facet
+shade_df <- tibble(
+  signal     = factor(signal_order, levels = signal_order),
+  shade_xmin = as.Date(signal_cutoffs),
+  shade_xmax = T_date
+)
+
+signal_colors_all <- c(
+  Kinsa      = "#E69F00",   # amber/orange
+  ILI        = "#CC79A7",   # pink/magenta
+  Influenza  = "#0072B2",   # deep blue
+  RSV        = "#009E73",   # teal green
+  `COVID-19` = "#D55E00"    # vermillion red
+)
+
+# Lag annotation labels per facet
+lag_labels <- tibble(
+  signal = factor(signal_order, levels = signal_order),
+  label  = c("No lag (real-time)",
+             "~1 week lag",
+             "~3 week maturation",
+             "~3 week maturation",
+             "~3 week maturation")
+)
+
+ggplot(all_signals_long, aes(x = time, y = value_norm)) +
+  geom_rect(data = shade_df,
+            aes(xmin = shade_xmin, xmax = shade_xmax,
+                ymin = -Inf, ymax = Inf),
+            inherit.aes = FALSE,
+            fill = "gray85", alpha = 0.7) +
+  # Solid = reliable
+  geom_line(data = ~ filter(.x, reliable),
+            aes(color = signal), linewidth = 1.1) +
+  # Dashed = exists but not yet reliable (starts at cutoff to connect)
+  geom_line(data = ~ group_by(.x, signal) %>%
+              filter(time >= cutoff) %>% ungroup(),
+            aes(color = signal), linewidth = 0.9,
+            linetype = "dashed", alpha = 0.45) +
+  # Vertical line at T
+  geom_vline(xintercept = T_date, color = "gray20",
+             linetype = "dashed", linewidth = 0.9) +
+  # Lag label inside each facet
+  geom_text(data = lag_labels,
+            aes(label = label),
+            x = plot_start + days(3), y = 0.95,
+            hjust = 0, size = 3.2, color = "gray30",
+            inherit.aes = FALSE) +
+  # T label once on the top facet only — avoid repetition
+  geom_text(data = tibble(signal = factor("Kinsa", levels = signal_order),
+                          time = T_date, value_norm = 1.08),
+            aes(x = time, y = value_norm, label = paste("T =", T_date)),
+            hjust = 1.05, size = 3.4, color = "gray20", inherit.aes = FALSE) +
+  facet_wrap(~ signal, ncol = 1, scales = "free_y") +
+  scale_color_manual(values = signal_colors_all, guide = "none") +
+  scale_x_date(date_breaks = "4 weeks", date_labels = "%b %d") +
+  labs(
+    title = "Signal reporting availability as of T",
+    subtitle = paste0(
+      "Solid = reliable as of T  |  Dashed = exists but not yet mature  |  ",
+      "Shaded = unreliable window\n",
+      "Kinsa: real-time  \u2502  ILI: ~1 week lag  \u2502  RESP-NET (Flu/RSV/COVID-19): ~3 week maturation"
+    ),
+    x = NULL, y = "Normalized value (0\u20131 within signal)"
+  ) +
+  theme_paper +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1),
+        strip.text = element_text(size = 12, face = "bold"))
+```
+
+---
+
 # Figure 1: Overall WIS by Model and Disease
 
 ```{r fig1-overall-wis, fig.width=10, fig.height=6}
