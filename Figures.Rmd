@@ -195,7 +195,59 @@ ggplot(cor_long, aes(x = Var1, y = Var2, fill = r)) +
         panel.grid = element_blank())
 ```
 
-## Figure D2: Reporting Availability as of `r T_date`
+## Figure D2: Observed Signal Time Series
+
+All five signals plotted over the full data range. Since the signals are
+on very different scales (Kinsa is percent ill, ILI and RESP-NET are counts),
+each is normalized 0–1 within its own range so co-movement is visible.
+The raw scale is labelled in each facet strip.
+
+```{r fig-d2-timeseries, fig.width=11, fig.height=9}
+series_long <- signal_data %>%
+  select(time,
+         Kinsa = kinsa, ILI = ili,
+         Influenza = flu, RSV = rsv, `COVID-19` = covid) %>%
+  pivot_longer(-time, names_to = "signal", values_to = "value") %>%
+  mutate(signal = factor(signal, levels = c("Kinsa", "ILI",
+                                            "Influenza", "RSV", "COVID-19")))
+
+# Compute raw range label per signal for the strip
+range_labels <- series_long %>%
+  group_by(signal) %>%
+  summarise(
+    lo = floor(min(value, na.rm = TRUE)),
+    hi = ceiling(max(value, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  mutate(range_label = paste0(signal, "\n[", lo, " – ", hi, "]"),
+         signal = factor(signal, levels = levels(series_long$signal)))
+
+series_long <- series_long %>%
+  group_by(signal) %>%
+  mutate(value_norm = (value - min(value, na.rm = TRUE)) /
+                      (max(value, na.rm = TRUE) - min(value, na.rm = TRUE))) %>%
+  ungroup() %>%
+  left_join(range_labels %>% select(signal, range_label), by = "signal") %>%
+  mutate(range_label = factor(range_label,
+                              levels = range_labels$range_label[order(range_labels$signal)]))
+
+ggplot(series_long, aes(x = time, y = value_norm, color = signal)) +
+  geom_line(linewidth = 0.8, alpha = 0.9) +
+  facet_wrap(~ range_label, ncol = 1, scales = "fixed") +
+  scale_color_manual(values = signal_colors_all, guide = "none") +
+  scale_x_date(date_breaks = "6 months", date_labels = "%b '%y") +
+  scale_y_continuous(breaks = c(0, 0.5, 1), labels = c("min", "mid", "max")) +
+  labs(
+    title = "Observed signal time series — Michigan, full study period",
+    subtitle = "Each signal normalized 0–1 | Raw range shown in facet label",
+    x = NULL, y = "Normalized value"
+  ) +
+  theme_paper +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1),
+        strip.text = element_text(size = 11, face = "bold"))
+```
+
+## Figure D3: Reporting Availability as of `r T_date`
 
 All five signals shown together, each in its own facet. Solid lines =
 reliable data as of T. Dashed lines = data that exists but has not yet
