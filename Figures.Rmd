@@ -38,16 +38,30 @@ model_labels <- c(
 
 disease_labels <- c(flu = "Influenza", rsv = "RSV", covid = "COVID-19")
 
-# 8 distinguishable colors: Kinsa family = blues, ILI family = oranges/reds
+# Colors: each model STRUCTURE gets a distinct hue.
+# Kinsa = dark/saturated, ILI = lighter/muted version of the same hue.
+# This makes structure immediately readable while family (Kinsa vs ILI)
+# is distinguishable by saturation/lightness.
+## Okabe-Ito-inspired colorblind-safe palette.
+## Hues are chosen so that adjacent categories (esp. M1 vs M2) differ in
+## BOTH hue and luminance -- distinguishable under deuteranopia/protanopia.
+## Kinsa family = saturated, ILI family = lighter tint of same hue.
 model_colors <- c(
-  "Base + Kinsa"             = "#4393C3",
-  "M1 (Diseases \u2192 Kinsa)"  = "#2166AC",
-  "M2 (Kinsa \u2192 Diseases)"  = "#053061",
-  "M3 MVN + Kinsa"           = "#92C5DE",
-  "Base + ILI"               = "#F4A582",
-  "M1 (Diseases \u2192 ILI)"    = "#D6604D",
-  "M2 (ILI \u2192 Diseases)"    = "#B2182B",
-  "M3 MVN + ILI"             = "#FDDBC7"
+  "Base + Kinsa"             = "#0072B2",  # deep blue         (Okabe-Ito)
+  "M1 (Diseases \u2192 Kinsa)"  = "#009E73",  # bluish green      (Okabe-Ito)
+  "M2 (Kinsa \u2192 Diseases)"  = "#D55E00",  # vermillion        (Okabe-Ito)
+  "M3 MVN + Kinsa"           = "#6A3D9A",  # dark purple
+  "Base + ILI"               = "#56B4E9",  # sky blue          (Okabe-Ito)
+  "M1 (Diseases \u2192 ILI)"    = "#8FD9C0",  # light bluish green (tint)
+  "M2 (ILI \u2192 Diseases)"    = "#F0B27A",  # light vermillion   (tint)
+  "M3 MVN + ILI"             = "#CAB2D6"   # light purple
+)
+signal_colors_all <- c(
+  Kinsa      = "#E69F00",   # amber/orange
+  ILI        = "#CC79A7",   # pink/magenta
+  Influenza  = "#0072B2",   # deep blue
+  RSV        = "#009E73",   # teal green
+  `COVID-19` = "#D55E00"    # vermillion red
 )
 
 results <- results %>%
@@ -154,7 +168,7 @@ ggplot(cor_long, aes(x = Var1, y = Var2, fill = r)) +
                        midpoint = 0, limits = c(-1, 1), name = "r") +
   labs(
     title = "Signal correlation matrix",
-    subtitle = "Pearson r on log\u2081\u208a(x) weekly values \u2014 Michigan, 2019\u20132026"
+    subtitle = "Pearson r on log(1+x) weekly values -- Michigan, 2019-2026"
   ) +
   theme_paper +
   theme(axis.text = element_text(size = 12),
@@ -261,13 +275,6 @@ shade_df <- tibble(
   shade_xmax = T_date
 )
 
-signal_colors_all <- c(
-  Kinsa      = "#E69F00",   # amber/orange
-  ILI        = "#CC79A7",   # pink/magenta
-  Influenza  = "#0072B2",   # deep blue
-  RSV        = "#009E73",   # teal green
-  `COVID-19` = "#D55E00"    # vermillion red
-)
 
 # Lag annotation labels per facet
 lag_labels <- tibble(
@@ -329,7 +336,7 @@ ggplot(all_signals_long, aes(x = time, y = value_norm)) +
 # Figure 1: Overall CRPS by Model and Disease
 
 ```{r fig1-overall-wis, fig.width=10, fig.height=6}
-overall <- results %>%
+overall <- results %>% filter(horizon == 0) %>%
   group_by(model, disease) %>%
   summarise(CRPS = mean(crps), .groups = "drop")
 
@@ -360,13 +367,12 @@ p_traces <- h0 %>%
   filter(model %in% trace_models) %>%
   ggplot(aes(x = target_date)) +
   geom_point(aes(y = truth), color = "black", size = 1.5, alpha = 0.6) +
-  geom_ribbon(aes(ymin = q25, ymax = q75, fill = model), alpha = 0.15) +
   geom_line(aes(y = median, color = model), linewidth = 0.7) +
   facet_wrap(~ disease, ncol = 1, scales = "free_y") +
   scale_color_manual(values = model_colors) +
   scale_fill_manual(values = model_colors) +
   labs(title = "Nowcast predictions vs. observed counts (horizon 0)",
-       subtitle = "Points = truth, lines = posterior median, ribbon = 50% CI",
+       subtitle = "Points = truth, lines = posterior median",
        x = NULL, y = "Count") +
   theme_paper +
   guides(fill = "none",
@@ -387,11 +393,11 @@ of weekly skill scores.
 ```{r fig3-crpss, fig.width=11, fig.height=7}
 # Separate reference baselines: Kinsa models vs base_kinsa, ILI vs base_ili
 base_kinsa_crps <- results %>%
-  filter(model == "Base + Kinsa") %>%
+  filter(model == "Base + Kinsa", horizon == 0) %>%
   select(disease, target_date, horizon, crps_base = crps)
 
 base_ili_crps <- results %>%
-  filter(model == "Base + ILI") %>%
+  filter(model == "Base + ILI", horizon == 0) %>%
   select(disease, target_date, horizon, crps_base = crps)
 
 crpss_df <- bind_rows(
@@ -428,7 +434,7 @@ ggplot(crpss_df, aes(x = model, y = crpss, fill = model)) +
     x = NULL, y = "CRPSS (higher is better)"
   ) +
   theme_paper +
-  theme(axis.text.x = element_text(angle = 30, hjust = 1, size = 10))
+  theme(axis.text.x = element_text(angle = 37, hjust = 1, size = 10))
 ```
 
 # Figure 4: CRPS by Horizon
@@ -498,7 +504,7 @@ ggplot(signal_comparison, aes(x = ILI, y = Kinsa, shape = structure, color = str
 
 How models perform during rising, peak, falling, and trough phases.
 
-```{r fig5-phase, fig.width=10, fig.height=7}
+```{r fig5-phase, fig.width=15, fig.height=6}
 # Classify phases from truth trajectory
 phase_labels <- results %>%
   filter(model == levels(results$model)[1]) %>%
@@ -523,9 +529,15 @@ phase_labels <- results %>%
   filter(!is.na(phase))
 
 phase_crps <- results %>%
+  filter(horizon == 0) %>%
   inner_join(phase_labels, by = c("disease", "target_date")) %>%
   group_by(model, disease, phase) %>%
-  summarise(CRPS = mean(crps), n = n(), .groups = "drop") %>%
+  summarise(
+    mean_crps = mean(crps),
+    se_crps   = sd(crps) / sqrt(n()),
+    n         = n(),
+    .groups   = "drop"
+  ) %>%
   mutate(phase = factor(phase, levels = c("Rising", "Peak", "Falling", "Trough", "Stable")))
 
 # Show the 4 Kinsa models + M3 ILI (drop base_ili since ≈ base_kinsa)
@@ -533,16 +545,42 @@ phase_models <- c("Base + Kinsa",
                    "M1 (Diseases \u2192 Kinsa)", "M2 (Kinsa \u2192 Diseases)",
                    "M3 MVN + Kinsa", "M3 MVN + ILI")
 
-ggplot(phase_crps %>% filter(model %in% phase_models),
-       aes(x = phase, y = CRPS, fill = model)) +
-  geom_col(position = position_dodge(width = 0.8), alpha = 0.85, width = 0.7) +
-  facet_wrap(~ disease, scales = "free_y") +
-  scale_fill_manual(values = model_colors) +
-  labs(title = "Mean CRPS by seasonal phase",
-       subtitle = "Rising = counts increasing, Peak = local max, Falling = decreasing, Trough = local min",
-       x = NULL, y = "Mean CRPS") +
-  theme_paper +
-  guides(fill = guide_legend(nrow = 2))
+# Helper: one panel per disease, wider dodge to avoid overlap
+make_phase_plot <- function(disease_name) {
+  phase_crps %>%
+    filter(model %in% phase_models, disease == disease_name) %>%
+    ggplot(aes(x = phase, y = mean_crps,
+               color = model, shape = model, group = model)) +
+    geom_errorbar(aes(ymin = mean_crps - se_crps,
+                      ymax = mean_crps + se_crps),
+                  position = position_dodge(width = 0.75),
+                  width = 0.25, linewidth = 0.65, alpha = 0.85) +
+    geom_point(position = position_dodge(width = 0.75),
+               size = 3, stroke = 0.9) +
+    scale_color_manual(values = model_colors) +
+    scale_shape_manual(values = c(16, 17, 15, 18, 8)) +
+    labs(title = disease_name, x = NULL, y = "Mean CRPS") +
+    theme_paper +
+    theme(legend.position = "none",
+          plot.title = element_text(size = 13, face = "bold"))
+}
+
+p_flu   <- make_phase_plot("Influenza")
+p_rsv   <- make_phase_plot("RSV")
+p_covid <- make_phase_plot("COVID-19")
+
+(p_flu | p_rsv | p_covid) +
+  plot_layout(guides = "collect") +
+  plot_annotation(
+    title    = "Mean CRPS by seasonal phase (horizon 0)",
+    subtitle = "Points = mean CRPS \u2502 Error bars = \u00b11 SE \u2502 Phase classified from 2-week forward/backward slope",
+    theme    = theme(
+      plot.title    = element_text(face = "bold", size = 14),
+      plot.subtitle = element_text(color = "gray30", size = 11)
+    )
+  ) &
+  theme(legend.position = "bottom",
+        legend.title     = element_blank())
 ```
 
 # Figure 7: Calibration

@@ -1,0 +1,15 @@
+---
+title: "Bayesian Nowcasting of Respiratory Diseases in Michigan"
+author: "Toby Salmon"
+date: "2026-04-30"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    number_sections: true
+bibliography: references.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
