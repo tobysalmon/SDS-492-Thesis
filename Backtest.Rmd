@@ -235,77 +235,6 @@ cat("\nTotal rows in results:", nrow(results), "\n")
 cat("Unique (model, as_of) combos:", nrow(distinct(results, model, as_of)), "\n")
 ```
 
-## Build ensemble predictions
-
-Two ensembles via quantile averaging (the same method used by the
-COVID-19 Forecast Hub / FluSight):
-
-- **Equal-weight mean** — average each quantile level across all 8 models.
-- **Equal-weight median** — take the median of each quantile across models
-  (more robust to a single model blowing up; Cramer et al. 2022).
-
-Both are computed from the cached CSV — no rerun needed.
-
-```{r build-ensembles}
-# ---- WIS helper (used for ALL models, not just ensembles) ----
-# Weighted Interval Score — the standard proper scoring rule for
-# quantile-format forecasts (Bracher et al. 2021, PLOS Comp Bio).
-# WIS approximates CRPS and is the metric used by CDC FluSight.
-#
-# With K prediction intervals at levels alpha_1, ..., alpha_K plus a
-# point forecast (median):
-#   WIS = (1/(K+0.5)) * [ 0.5*|y-m| + sum_k (alpha_k/2) * IS_{alpha_k} ]
-# where IS_alpha = (u-l) + (2/alpha)(l-y)^+ + (2/alpha)(y-u)^+
-
-compute_wis <- function(truth, q025, q25, median, q75, q975) {
-  IS <- function(y, l, u, alpha) {
-    (u - l) +
-      (2 / alpha) * pmax(l - y, 0) +
-      (2 / alpha) * pmax(y - u, 0)
-  }
-  is_95 <- IS(truth, q025, q975, alpha = 0.05)
-  is_50 <- IS(truth, q25,  q75,  alpha = 0.50)
-  mae   <- abs(truth - median)
-  # K = 2 intervals, weights = alpha_k / 2
-  (1 / 2.5) * (0.5 * mae + (0.05 / 2) * is_95 + (0.50 / 2) * is_50)
-}
-
-# ---- Build ensemble predictions ----
-build_ensemble <- function(df, ensemble_name, agg_fn) {
-  df %>%
-    group_by(disease, as_of, target_date, horizon, truth) %>%
-    summarise(
-      mean   = agg_fn(mean),
-      median = agg_fn(median),
-      q025   = agg_fn(q025),
-      q25    = agg_fn(q25),
-      q75    = agg_fn(q75),
-      q975   = agg_fn(q975),
-      .groups = "drop"
-    ) %>%
-    mutate(model = ensemble_name)
-}
-
-ensemble_mean   <- build_ensemble(results, "ensemble_mean",   mean)
-ensemble_median <- build_ensemble(results, "ensemble_median", median)
-
-# Append ensemble rows to results
-results <- bind_rows(results, ensemble_mean, ensemble_median)
-
-# ---- Recompute crps for ALL models using WIS ----
-# This puts every model on the same scoring scale (quantile-based).
-# The original sample-based CRPS is saved as crps_sample for reference.
-results <- results %>%
-  rename(crps_orig = crps) %>%
-  mutate(crps = compute_wis(truth, q025, q25, median, q75, q975))
-
-cat("Added", nrow(ensemble_mean), "ensemble_mean rows and",
-    nrow(ensemble_median), "ensemble_median rows\n")
-cat("Recomputed crps (WIS) for all", n_distinct(results$model), "models\n")
-cat("Total rows now:", nrow(results), "\n")
-cat("Total rows now:", nrow(results), "\n")
-```
-
 ## Summary metrics
 
 ```{r metrics}
@@ -678,9 +607,7 @@ model_labels <- c(
   base_ili        = "Base + ILI",
   m1_ili          = "M1 (Diseases → ILI)",
   m2_ili          = "M2 (ILI → Diseases)",
-  m3_ili          = "M3 MVN + ILI",
-  ensemble_mean   = "Ensemble (Mean)",
-  ensemble_median = "Ensemble (Median)"
+  m3_ili          = "M3 MVN + ILI"
 )
 
 results_labeled <- results %>%
@@ -761,10 +688,9 @@ base_ili_crps <- results_labeled %>%
 skill_tbl <- results_labeled %>%
   filter(!model %in% c("Base + Kinsa", "Base + ILI")) %>%
   mutate(family = case_when(
-    str_detect(as.character(model), "Kinsa")    ~ "kinsa",
-    str_detect(as.character(model), "ILI")      ~ "ili",
-    str_detect(as.character(model), "Ensemble") ~ "kinsa",   # ensembles vs base_kinsa
-    TRUE                                        ~ "kinsa"
+    str_detect(as.character(model), "Kinsa") ~ "kinsa",
+    str_detect(as.character(model), "ILI")   ~ "ili",
+    TRUE                                     ~ "kinsa"
   )) %>%
   left_join(
     bind_rows(

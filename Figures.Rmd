@@ -336,7 +336,7 @@ ggplot(all_signals_long, aes(x = time, y = value_norm)) +
 # Figure 1: Overall CRPS by Model and Disease
 
 ```{r fig1-overall-wis, fig.width=10, fig.height=6}
-overall <- results %>% filter(horizon == 0) %>%
+overall <- results %>% #filter(horizon == 0) %>%
   group_by(model, disease) %>%
   summarise(CRPS = mean(crps), .groups = "drop")
 
@@ -345,7 +345,7 @@ ggplot(overall, aes(x = reorder(model, CRPS), y = CRPS, fill = model)) +
   facet_wrap(~ disease, scales = "free_x") +
   coord_flip() +
   scale_fill_manual(values = model_colors, guide = "none") +
-  labs(title = "Mean CRPS by model and disease",
+  labs(title = "Mean CRPS by Model and Disease",
        subtitle = "100-week rolling-origin backtest | lower is better",
        x = NULL, y = "Mean CRPS") +
   theme_paper
@@ -545,6 +545,12 @@ phase_models <- c("Base + Kinsa",
                    "M1 (Diseases \u2192 Kinsa)", "M2 (Kinsa \u2192 Diseases)",
                    "M3 MVN + Kinsa", "M3 MVN + ILI")
 
+# Shared y-range across all three diseases (for same-scale comparison)
+phase_ylim <- phase_crps %>%
+  filter(model %in% phase_models) %>%
+  summarise(lo = min(mean_crps - se_crps, na.rm = TRUE),
+            hi = max(mean_crps + se_crps, na.rm = TRUE))
+
 # Helper: one panel per disease, wider dodge to avoid overlap
 make_phase_plot <- function(disease_name) {
   phase_crps %>%
@@ -559,6 +565,7 @@ make_phase_plot <- function(disease_name) {
                size = 3, stroke = 0.9) +
     scale_color_manual(values = model_colors) +
     scale_shape_manual(values = c(16, 17, 15, 18, 8)) +
+    coord_cartesian(ylim = c(phase_ylim$lo, phase_ylim$hi)) +
     labs(title = disease_name, x = NULL, y = "Mean CRPS") +
     theme_paper +
     theme(legend.position = "none",
@@ -583,7 +590,171 @@ p_covid <- make_phase_plot("COVID-19")
         legend.title     = element_blank())
 ```
 
-# Figure 7: Calibration
+# Figure 7: Performance by Respiratory Season
+
+Groups the 100 backtest weeks by respiratory season (Oct–Sep), so we can
+see whether model rankings are stable across years or whether particular
+models shine in certain seasons (e.g., the 2024–25 flu peak).
+
+```{r fig-season, fig.width=13, fig.height=7}
+results_season <- results %>%
+  filter(horizon == 0) %>%
+  mutate(
+    # Respiratory season: Oct 2024 - Sep 2025 = "2024-25"
+    resp_year = if_else(month(target_date) >= 10,
+                        year(target_date),
+                        year(target_date) - 1),
+    season = paste0(resp_year, "-",
+                    str_sub(as.character(resp_year + 1), 3, 4))
+  )
+
+season_metrics <- results_season %>%
+  group_by(model, disease, season) %>%
+  summarise(
+    n         = n(),
+    mean_crps = mean(crps),
+    se_crps   = sd(crps) / sqrt(n()),
+    .groups   = "drop"
+  )
+
+# Drop seasons with too few weeks in the backtest window (e.g. partial edges)
+season_metrics <- season_metrics %>%
+  group_by(season) %>% filter(sum(n) >= 5) %>% ungroup()
+
+ggplot(season_metrics,
+       aes(x = season, y = mean_crps,
+           color = model, shape = model, group = model)) +
+  geom_errorbar(aes(ymin = mean_crps - se_crps,
+                    ymax = mean_crps + se_crps),
+                position = position_dodge(width = 0.7),
+                width = 0.25, linewidth = 0.6, alpha = 0.85) +
+  geom_point(position = position_dodge(width = 0.7),
+             size = 3, stroke = 0.9) +
+  facet_wrap(~ disease, scales = "free_y") +
+  scale_color_manual(values = model_colors) +
+  scale_shape_manual(values = c(16, 17, 15, 18, 1, 2, 0, 5)) +
+  labs(
+    title = "Mean CRPS by model, disease, and respiratory season (horizon 0)",
+    subtitle = "Respiratory season = Oct\u2013Sep  \u2502  Points = mean CRPS  \u2502  Error bars = \u00b11 SE",
+    x = "Respiratory season", y = "Mean CRPS"
+  ) +
+  theme_paper +
+  guides(color = guide_legend(nrow = 2, override.aes = list(size = 3)),
+         shape = guide_legend(nrow = 2)) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+## Table: CRPS by Respiratory Season
+
+```{r table-season}
+season_tbl <- season_metrics %>%
+  mutate(CRPS = round(mean_crps, 1)) %>%
+  select(season, model, disease, CRPS) %>%
+  pivot_wider(names_from = disease, values_from = CRPS) %>%
+  arrange(season, model) %>%
+  select(season, model, Influenza, RSV, `COVID-19`)
+
+kbl(season_tbl %>% select(-season),
+    align = c("l", rep("r", 3)),
+    caption = "Mean CRPS by model and respiratory season (horizon 0). Each season covers Oct-Sep.") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"),
+                full_width = FALSE, font_size = 12) %>%
+  pack_rows(index = table(season_tbl$season))
+```
+
+# Figure 8: Early-Season Performance (Sep–Dec)
+
+Restricts the backtest to the early-season weeks of each respiratory season
+(Sep–Dec). This is arguably the most operationally important window: cases
+are climbing, RESP-NET has not yet matured, and public-health decisions
+about capacity and messaging depend on getting an early read on the wave.
+
+```{r fig-early-season, fig.width=12, fig.height=6}
+early_season <- results %>%
+  filter(horizon == 0, month(target_date) %in% 9:12)
+
+early_summary <- early_season %>%
+  group_by(model, disease) %>%
+  summarise(
+    n         = n(),
+    mean_crps = mean(crps),
+    se_crps   = sd(crps) / sqrt(n()),
+    .groups   = "drop"
+  )
+
+# Compare directly against the full-year average to highlight
+# how model rankings shift in the ramp-up phase.
+full_year_summary <- results %>%
+  filter(horizon == 0) %>%
+  group_by(model, disease) %>%
+  summarise(mean_crps = mean(crps), .groups = "drop") %>%
+  mutate(window = "Full year")
+
+early_summary_plot <- early_summary %>%
+  mutate(window = "Early season (Sep\u2013Dec)") %>%
+  select(model, disease, mean_crps, window) %>%
+  bind_rows(full_year_summary) %>%
+  mutate(window = factor(window,
+                         levels = c("Full year", "Early season (Sep\u2013Dec)")))
+
+ggplot(early_summary_plot,
+       aes(x = reorder(model, mean_crps), y = mean_crps,
+           fill = model, alpha = window)) +
+  geom_col(position = position_dodge(width = 0.75), width = 0.7) +
+  facet_wrap(~ disease, scales = "free_x") +
+  coord_flip() +
+  scale_fill_manual(values = model_colors, guide = "none") +
+  scale_alpha_manual(values = c("Full year" = 0.4,
+                                "Early season (Sep\u2013Dec)" = 1),
+                     name = NULL) +
+  labs(
+    title = "Mean CRPS: early season vs. full year (horizon 0)",
+    subtitle = "Early-season weeks are when nowcasts matter most \u2014 cases climbing, RESP-NET not yet mature",
+    x = NULL, y = "Mean CRPS"
+  ) +
+  theme_paper
+```
+
+## Table: Early-Season Nowcast Performance
+
+```{r table-early-season}
+early_tbl <- early_summary %>%
+  mutate(CRPS = round(mean_crps, 1),
+         SE   = round(se_crps, 2)) %>%
+  select(model, disease, n, CRPS, SE) %>%
+  pivot_wider(names_from = disease,
+              values_from = c(CRPS, SE),
+              names_glue = "{disease}_{.value}") %>%
+  select(model,
+         starts_with("Influenza"),
+         starts_with("RSV"),
+         starts_with("COVID"))
+
+# Bold best CRPS per disease column
+early_fmt <- early_tbl
+for (col in names(early_fmt)[-1]) {
+  if (grepl("_CRPS$", col)) {
+    x <- early_fmt[[col]]
+    best <- which.min(x)
+    out <- as.character(x)
+    out[best] <- cell_spec(out[best], bold = TRUE)
+    early_fmt[[col]] <- out
+  } else {
+    early_fmt[[col]] <- as.character(early_fmt[[col]])
+  }
+}
+
+kbl(early_fmt, escape = FALSE, align = c("l", rep("r", 6)),
+    caption = paste(
+      "Mean CRPS and standard error during early-season weeks (Sep-Dec, horizon 0).",
+      "Bold = best per disease. Standard error computed across weeks."
+    )) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"),
+                full_width = FALSE, font_size = 12) %>%
+  add_header_above(c(" " = 1, "Influenza" = 2, "RSV" = 2, "COVID-19" = 2))
+```
+
+# Figure 9: Calibration
 
 Are prediction intervals well-calibrated? Bars show empirical coverage
 vs. nominal levels (dashed lines).
