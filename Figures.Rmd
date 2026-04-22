@@ -20,6 +20,9 @@ library(kableExtra)
 library(patchwork)
 library(scales)
 
+# ---- Output directory for paper-ready figures/tables ----
+dir.create("figures", showWarnings = FALSE, recursive = TRUE)
+
 # ---- Load cached backtest results ----
 results <- read_csv("results/backtest_predictions.csv", show_col_types = FALSE) %>%
   mutate(as_of = as.Date(as_of), target_date = as.Date(target_date))
@@ -161,7 +164,7 @@ cor_long <- cor_mat %>%
     Var2 = factor(Var2, levels = rev(colnames(cor_mat)))
   )
 
-ggplot(cor_long, aes(x = Var1, y = Var2, fill = r)) +
+corr_mat <- ggplot(cor_long, aes(x = Var1, y = Var2, fill = r)) +
   geom_tile(color = "white", linewidth = 0.8) +
   geom_text(aes(label = sprintf("%.2f", r)), size = 4.5, fontface = "bold") +
   scale_fill_gradient2(low = "#053061", mid = "white", high = "#67001F",
@@ -174,6 +177,9 @@ ggplot(cor_long, aes(x = Var1, y = Var2, fill = r)) +
   theme(axis.text = element_text(size = 12),
         legend.position = "right",
         panel.grid = element_blank())
+
+ggsave("figures/fig-d1-correlation.png", corr_mat, width = 7, height = 6, dpi = 300)
+corr_mat
 ```
 
 ## Figure D2: Observed Signal Time Series
@@ -212,7 +218,7 @@ series_long <- series_long %>%
   mutate(range_label = factor(range_label,
                               levels = range_labels$range_label[order(range_labels$signal)]))
 
-ggplot(series_long, aes(x = time, y = value_norm, color = signal)) +
+time_series_all_signals <- ggplot(series_long, aes(x = time, y = value_norm, color = signal)) +
   geom_line(linewidth = 0.8, alpha = 0.9) +
   facet_wrap(~ range_label, ncol = 1, scales = "fixed") +
   scale_color_manual(values = signal_colors_all, guide = "none") +
@@ -226,7 +232,11 @@ ggplot(series_long, aes(x = time, y = value_norm, color = signal)) +
   theme_paper +
   theme(axis.text.x = element_text(angle = 30, hjust = 1),
         strip.text = element_text(size = 11, face = "bold"))
+
+ggsave("figures/fig-d2-timeseries.png", time_series_all_signals, width = 11, height = 9, dpi = 300)
+time_series_all_signals
 ```
+
 
 ## Figure D3: Reporting Availability as of `r T_date`
 
@@ -286,7 +296,7 @@ lag_labels <- tibble(
              "~3 week maturation")
 )
 
-ggplot(all_signals_long, aes(x = time, y = value_norm)) +
+reporting_delay_plot <- ggplot(all_signals_long, aes(x = time, y = value_norm)) +
   geom_rect(data = shade_df,
             aes(xmin = shade_xmin, xmax = shade_xmax,
                 ymin = -Inf, ymax = Inf),
@@ -329,6 +339,10 @@ ggplot(all_signals_long, aes(x = time, y = value_norm)) +
   theme_paper +
   theme(axis.text.x = element_text(angle = 30, hjust = 1),
         strip.text = element_text(size = 12, face = "bold"))
+
+ggsave("figures/fig-d3-reporting-delay.png", reporting_delay_plot,
+       width = 10, height = 11, dpi = 300)
+reporting_delay_plot
 ```
 
 ---
@@ -340,7 +354,7 @@ overall <- results %>% #filter(horizon == 0) %>%
   group_by(model, disease) %>%
   summarise(CRPS = mean(crps), .groups = "drop")
 
-ggplot(overall, aes(x = reorder(model, CRPS), y = CRPS, fill = model)) +
+fig1_overall <- ggplot(overall, aes(x = reorder(model, CRPS), y = CRPS, fill = model)) +
   geom_col(alpha = 0.85, width = 0.7) +
   facet_wrap(~ disease, scales = "free_x") +
   coord_flip() +
@@ -349,6 +363,10 @@ ggplot(overall, aes(x = reorder(model, CRPS), y = CRPS, fill = model)) +
        subtitle = "100-week rolling-origin backtest | lower is better",
        x = NULL, y = "Mean CRPS") +
   theme_paper
+
+ggsave("figures/fig1-overall-crps.png", fig1_overall,
+       width = 10, height = 6, dpi = 300)
+fig1_overall
 ```
 
 # Figure 2: Nowcast Traces (Horizon 0 Only)
@@ -378,6 +396,8 @@ p_traces <- h0 %>%
   guides(fill = "none",
          color = guide_legend(nrow = 2, override.aes = list(linewidth = 1.5)))
 
+ggsave("figures/fig2-nowcast-traces.png", p_traces,
+       width = 11, height = 10, dpi = 300)
 p_traces
 ```
 
@@ -417,7 +437,7 @@ crpss_summary <- crpss_df %>%
   group_by(model, disease) %>%
   summarise(mean_crpss = mean(crpss), .groups = "drop")
 
-ggplot(crpss_df, aes(x = model, y = crpss, fill = model)) +
+fig3_crpss <- ggplot(crpss_df, aes(x = model, y = crpss, fill = model)) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray30", linewidth = 0.8) +
   geom_boxplot(alpha = 0.7, outlier.alpha = 0.2, outlier.size = 0.8) +
   stat_summary(fun = mean, geom = "point", shape = 23,
@@ -435,6 +455,10 @@ ggplot(crpss_df, aes(x = model, y = crpss, fill = model)) +
   ) +
   theme_paper +
   theme(axis.text.x = element_text(angle = 37, hjust = 1, size = 10))
+
+ggsave("figures/fig3-crpss.png", fig3_crpss,
+       width = 11, height = 7, dpi = 300)
+fig3_crpss
 ```
 
 # Figure 4: CRPS by Horizon
@@ -452,7 +476,7 @@ horizon_summary <- results %>%
     labels = c("-2\n(2wk back)", "-1\n(1wk back)", "0\n(nowcast)")
   ))
 
-ggplot(horizon_summary,
+fig4_horizon <- ggplot(horizon_summary,
        aes(x = horizon_label, y = CRPS, color = model, group = model)) +
   geom_line(linewidth = 0.9) +
   geom_point(size = 2.5) +
@@ -463,44 +487,13 @@ ggplot(horizon_summary,
        x = "Horizon", y = "Mean CRPS") +
   theme_paper +
   guides(color = guide_legend(nrow = 2, override.aes = list(linewidth = 1.5)))
+
+ggsave("figures/fig4-horizon.png", fig4_horizon,
+       width = 10, height = 6, dpi = 300)
+fig4_horizon
 ```
 
-# Figure 5: Kinsa vs ILI Signal Comparison
-
-Direct comparison of the two signal families. For each model structure
-(Base, M1, M2, M3), plot the Kinsa version's WIS against the ILI version's.
-
-```{r fig4-kinsa-vs-ili, fig.width=9, fig.height=6}
-# Map each model to its structure and signal family
-signal_comparison <- results %>%
-  mutate(
-    structure = case_when(
-      str_detect(model, "Base")  ~ "Base",
-      str_detect(model, "M1")    ~ "M1",
-      str_detect(model, "M2")    ~ "M2",
-      str_detect(model, "M3")    ~ "M3"
-    ),
-    signal = if_else(str_detect(model, "Kinsa"), "Kinsa", "ILI")
-  ) %>%
-  group_by(structure, signal, disease) %>%
-  summarise(CRPS = mean(crps), .groups = "drop") %>%
-  pivot_wider(names_from = signal, values_from = CRPS)
-
-ggplot(signal_comparison, aes(x = ILI, y = Kinsa, shape = structure, color = structure)) +
-  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
-  geom_point(size = 4, stroke = 1.2) +
-  facet_wrap(~ disease, scales = "free") +
-  scale_shape_manual(values = c(Base = 16, M1 = 17, M2 = 15, M3 = 18)) +
-  scale_color_brewer(palette = "Dark2") +
-  labs(title = "Kinsa vs. ILI signal: Mean CRPS comparison",
-       subtitle = "Points below the diagonal = Kinsa outperforms ILI",
-       x = "Mean CRPS (ILI version)", y = "Mean CRPS (Kinsa version)",
-       shape = "Model structure", color = "Model structure") +
-  theme_paper +
-  theme(legend.position = "right")
-```
-
-# Figure 6: Seasonal Phase Performance
+# Figure 5: Seasonal Phase Performance
 
 How models perform during rising, peak, falling, and trough phases.
 
@@ -576,7 +569,7 @@ p_flu   <- make_phase_plot("Influenza")
 p_rsv   <- make_phase_plot("RSV")
 p_covid <- make_phase_plot("COVID-19")
 
-(p_flu | p_rsv | p_covid) +
+fig5_phase <- (p_flu | p_rsv | p_covid) +
   plot_layout(guides = "collect") +
   plot_annotation(
     title    = "Mean CRPS by seasonal phase (horizon 0)",
@@ -588,9 +581,13 @@ p_covid <- make_phase_plot("COVID-19")
   ) &
   theme(legend.position = "bottom",
         legend.title     = element_blank())
+
+ggsave("figures/fig5-phase.png", fig5_phase,
+       width = 15, height = 6, dpi = 300)
+fig5_phase
 ```
 
-# Figure 7: Performance by Respiratory Season
+# Figure 6: Performance by Respiratory Season
 
 Groups the 100 backtest weeks by respiratory season (Oct–Sep), so we can
 see whether model rankings are stable across years or whether particular
@@ -621,7 +618,7 @@ season_metrics <- results_season %>%
 season_metrics <- season_metrics %>%
   group_by(season) %>% filter(sum(n) >= 5) %>% ungroup()
 
-ggplot(season_metrics,
+fig6_season <- ggplot(season_metrics,
        aes(x = season, y = mean_crps,
            color = model, shape = model, group = model)) +
   geom_errorbar(aes(ymin = mean_crps - se_crps,
@@ -642,6 +639,10 @@ ggplot(season_metrics,
   guides(color = guide_legend(nrow = 2, override.aes = list(size = 3)),
          shape = guide_legend(nrow = 2)) +
   theme(axis.text.x = element_text(angle = 30, hjust = 1))
+
+ggsave("figures/fig6-season.png", fig6_season,
+       width = 13, height = 7, dpi = 300)
+fig6_season
 ```
 
 ## Table: CRPS by Respiratory Season
@@ -654,15 +655,18 @@ season_tbl <- season_metrics %>%
   arrange(season, model) %>%
   select(season, model, Influenza, RSV, `COVID-19`)
 
-kbl(season_tbl %>% select(-season),
+tbl_season_kbl <- kbl(season_tbl %>% select(-season),
     align = c("l", rep("r", 3)),
     caption = "Mean CRPS by model and respiratory season (horizon 0). Each season covers Oct-Sep.") %>%
   kable_styling(bootstrap_options = c("striped", "condensed"),
                 full_width = FALSE, font_size = 12) %>%
   pack_rows(index = table(season_tbl$season))
+
+save_kable(tbl_season_kbl, file = "figures/table-season.html", self_contained = TRUE)
+tbl_season_kbl
 ```
 
-# Figure 8: Early-Season Performance (Sep–Dec)
+# Figure 7: Early-Season Performance (Sep–Dec)
 
 Restricts the backtest to the early-season weeks of each respiratory season
 (Sep–Dec). This is arguably the most operationally important window: cases
@@ -697,7 +701,7 @@ early_summary_plot <- early_summary %>%
   mutate(window = factor(window,
                          levels = c("Full year", "Early season (Sep\u2013Dec)")))
 
-ggplot(early_summary_plot,
+fig7_early_season <- ggplot(early_summary_plot,
        aes(x = reorder(model, mean_crps), y = mean_crps,
            fill = model, alpha = window)) +
   geom_col(position = position_dodge(width = 0.75), width = 0.7) +
@@ -713,6 +717,10 @@ ggplot(early_summary_plot,
     x = NULL, y = "Mean CRPS"
   ) +
   theme_paper
+
+ggsave("figures/fig7-early-season.png", fig7_early_season,
+       width = 12, height = 6, dpi = 300)
+fig7_early_season
 ```
 
 ## Table: Early-Season Nowcast Performance
@@ -744,7 +752,7 @@ for (col in names(early_fmt)[-1]) {
   }
 }
 
-kbl(early_fmt, escape = FALSE, align = c("l", rep("r", 6)),
+tbl_early_kbl <- kbl(early_fmt, escape = FALSE, align = c("l", rep("r", 6)),
     caption = paste(
       "Mean CRPS and standard error during early-season weeks (Sep-Dec, horizon 0).",
       "Bold = best per disease. Standard error computed across weeks."
@@ -752,40 +760,9 @@ kbl(early_fmt, escape = FALSE, align = c("l", rep("r", 6)),
   kable_styling(bootstrap_options = c("striped", "condensed"),
                 full_width = FALSE, font_size = 12) %>%
   add_header_above(c(" " = 1, "Influenza" = 2, "RSV" = 2, "COVID-19" = 2))
-```
 
-# Figure 9: Calibration
-
-Are prediction intervals well-calibrated? Bars show empirical coverage
-vs. nominal levels (dashed lines).
-
-```{r fig6-calibration, fig.width=10, fig.height=5}
-cal_models <- c("Base + Kinsa", "M1 (Diseases \u2192 Kinsa)",
-                "M2 (Kinsa \u2192 Diseases)", "M3 MVN + Kinsa", "M3 MVN + ILI")
-
-calibration <- results %>%
-  filter(model %in% cal_models) %>%
-  group_by(model, disease) %>%
-  summarise(
-    `50%` = mean(truth >= q25  & truth <= q75)  * 100,
-    `95%` = mean(truth >= q025 & truth <= q975) * 100,
-    .groups = "drop"
-  ) %>%
-  pivot_longer(cols = c(`50%`, `95%`),
-               names_to = "interval", values_to = "coverage") %>%
-  mutate(nominal = as.numeric(str_extract(interval, "\\d+")))
-
-ggplot(calibration, aes(x = model, y = coverage, fill = model)) +
-  geom_col(alpha = 0.8, width = 0.7) +
-  geom_hline(aes(yintercept = nominal), linetype = "dashed", color = "gray30") +
-  facet_grid(interval ~ disease) +
-  scale_fill_manual(values = model_colors, guide = "none") +
-  scale_y_continuous(limits = c(0, 100)) +
-  labs(title = "Empirical coverage vs. nominal prediction intervals",
-       subtitle = "Dashed line = target | bars above = conservative, below = overconfident",
-       x = NULL, y = "Coverage (%)") +
-  theme_paper +
-  theme(axis.text.x = element_text(angle = 35, hjust = 1, size = 10))
+save_kable(tbl_early_kbl, file = "figures/table-early-season.html", self_contained = TRUE)
+tbl_early_kbl
 ```
 
 ---
@@ -868,11 +845,14 @@ for (col in names(tbl1_fmt)[-1]) {
   }
 }
 
-kbl(tbl1_fmt, escape = FALSE, align = c("l", rep("r", 9)),
+tbl1_kbl <- kbl(tbl1_fmt, escape = FALSE, align = c("l", rep("r", 9)),
     caption = "Table 1: Nowcast performance at horizon 0 (100-week rolling-origin backtest). CRPS is sample-based from full posterior draws. CRPSS = 1 - CRPS/CRPS\\_base (vs. family baseline; higher is better). Bold = best per column.") %>%
   kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE,
                 font_size = 12) %>%
   add_header_above(c(" " = 1, "Influenza" = 3, "RSV" = 3, "COVID-19" = 3))
+
+save_kable(tbl1_kbl, file = "figures/table1-overall.html", self_contained = TRUE)
+tbl1_kbl
 ```
 
 ## Table 2: CRPSS by Model and Disease
@@ -911,11 +891,14 @@ for (col in names(skill_fmt)[-1]) {
   skill_fmt[[col]] <- out
 }
 
-kbl(skill_fmt, escape = FALSE, align = c("l", rep("r", 6)),
+tbl2_kbl <- kbl(skill_fmt, escape = FALSE, align = c("l", rep("r", 6)),
     caption = "Table 2: CRPSS relative to family baseline (Kinsa models vs. Base + Kinsa; ILI models vs. Base + ILI). Higher CRPSS = greater improvement. Bold = best per column. Horizon = 0") %>%
   kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE,
                 font_size = 12) %>%
   add_header_above(c(" " = 1, "Influenza" = 2, "RSV" = 2, "COVID-19" = 2))
+
+save_kable(tbl2_kbl, file = "figures/table2-crpss.html", self_contained = TRUE)
+tbl2_kbl
 ```
 
 ## Table 3: Performance by Horizon
@@ -934,12 +917,15 @@ horizon_wide <- horizon_tbl %>%
   arrange(horizon, model) %>%
   select(horizon_label, model, Influenza, RSV, `COVID-19`)
 
-kbl(horizon_wide %>% select(-horizon_label),
+tbl3_kbl <- kbl(horizon_wide %>% select(-horizon_label),
     align = c("l", rep("r", 3)),
     caption = "Table 3: Mean CRPS by model and horizon. Horizon 0 is the nowcast week (hardest).") %>%
   kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE,
                 font_size = 12) %>%
   pack_rows(index = table(horizon_wide$horizon_label))
+
+save_kable(tbl3_kbl, file = "figures/table3-horizon.html", self_contained = TRUE)
+tbl3_kbl
 ```
 
 ## Table 4: CRPS at Horizon 0 (Nowcast Week)
@@ -977,7 +963,7 @@ for (col in c("Influenza", "RSV", "COVID-19")) {
   }
 }
 
-kbl(crps_fmt %>% select(-structure),
+tbl4_kbl <- kbl(crps_fmt %>% select(-structure),
     escape = FALSE, align = c("l", "l", "r", "r", "r"),
     caption = paste(
       "Table 4: Mean CRPS at horizon 0 (nowcast week) by model and disease.",
@@ -988,4 +974,7 @@ kbl(crps_fmt %>% select(-structure),
                 font_size = 12) %>%
   pack_rows(index = table(crps_fmt$structure)) %>%
   add_header_above(c(" " = 2, "Mean CRPS" = 3))
+
+save_kable(tbl4_kbl, file = "figures/table4-horizon0-crps.html", self_contained = TRUE)
+tbl4_kbl
 ```
