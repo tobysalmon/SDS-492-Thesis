@@ -150,7 +150,7 @@ each surveillance signal co-moves with the disease-specific RESP-NET counts.
 ```{r fig-d1-correlation, fig.width=7, fig.height=6}
 cor_df <- signal_data %>%
   select(Kinsa = kinsa, ILI = ili, Influenza = flu, RSV = rsv, `COVID-19` = covid) %>%
-  filter(complete.cases(.)) %>%
+  filter(complete.cases(.),) %>%
   mutate(across(everything(), log1p))
 
 cor_mat <- cor(cor_df, use = "complete.obs")
@@ -695,11 +695,11 @@ full_year_summary <- results %>%
   mutate(window = "Full year")
 
 early_summary_plot <- early_summary %>%
-  mutate(window = "Early season (Sep\u2013Dec)") %>%
+  mutate(window = "Early season (Sep - Dec)") %>%
   select(model, disease, mean_crps, window) %>%
   bind_rows(full_year_summary) %>%
   mutate(window = factor(window,
-                         levels = c("Full year", "Early season (Sep\u2013Dec)")))
+                         levels = c("Full year", "Early season (Sep - Dec)")))
 
 fig7_early_season <- ggplot(early_summary_plot,
        aes(x = reorder(model, mean_crps), y = mean_crps,
@@ -709,10 +709,10 @@ fig7_early_season <- ggplot(early_summary_plot,
   coord_flip() +
   scale_fill_manual(values = model_colors, guide = "none") +
   scale_alpha_manual(values = c("Full year" = 0.4,
-                                "Early season (Sep\u2013Dec)" = 1),
+                                "Early season (Sep - Dec)" = 1),
                      name = NULL) +
   labs(
-    title = "Mean CRPS: early season vs. full year (horizon 0)",
+    title = "Mean CRPS: early season (Sep - Dec) vs. full year (horizon 0)",
     subtitle = "Early-season weeks are when nowcasts matter most \u2014 cases climbing, RESP-NET not yet mature",
     x = NULL, y = "Mean CRPS"
   ) +
@@ -807,15 +807,14 @@ metrics_all <- results_with_skill %>%
 ```{r table-1}
 tbl1 <- metrics_all %>%
   mutate(
-    CRPS      = round(mean_crps,  1),
-    CRPSS     = round(mean_crpss, 3),
-    `95% Cov` = round(cover_95,   0)
+    CRPS  = round(mean_crps,  1),
+    CRPSS = round(mean_crpss, 3)
   ) %>%
-  select(model, disease, CRPS, CRPSS, `95% Cov`)
+  select(model, disease, CRPS, CRPSS)
 
 tbl1_wide <- tbl1 %>%
   pivot_wider(names_from = disease,
-              values_from = c(CRPS, CRPSS, `95% Cov`),
+              values_from = c(CRPS, CRPSS),
               names_glue = "{disease}_{.value}") %>%
   select(model, starts_with("Influenza"), starts_with("RSV"), starts_with("COVID"))
 
@@ -831,9 +830,7 @@ bold_best <- function(x, target = NA) {
 # before later columns are processed
 tbl1_fmt <- tbl1_wide
 for (col in names(tbl1_fmt)[-1]) {
-  if (grepl("Cov", col)) {
-    tbl1_fmt[[col]] <- bold_best(tbl1_fmt[[col]], target = 95)
-  } else if (grepl("CRPSS", col)) {
+  if (grepl("CRPSS", col)) {
     # For CRPSS, higher is better — bold the maximum
     x <- tbl1_fmt[[col]]
     best <- which.max(x)
@@ -845,11 +842,11 @@ for (col in names(tbl1_fmt)[-1]) {
   }
 }
 
-tbl1_kbl <- kbl(tbl1_fmt, escape = FALSE, align = c("l", rep("r", 9)),
-    caption = "Table 1: Nowcast performance at horizon 0 (100-week rolling-origin backtest). CRPS is sample-based from full posterior draws. CRPSS = 1 - CRPS/CRPS\\_base (vs. family baseline; higher is better). Bold = best per column.") %>%
+tbl1_kbl <- kbl(tbl1_fmt, escape = FALSE, align = c("l", rep("r", 6)),
+    caption = "Table 1: Nowcast performance at horizon 0 (100-week rolling-origin backtest) Evaluated with Mean CRPS and Mean CRPSS values . Bold = best per column.") %>%
   kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE,
                 font_size = 12) %>%
-  add_header_above(c(" " = 1, "Influenza" = 3, "RSV" = 3, "COVID-19" = 3))
+  add_header_above(c(" " = 1, "Influenza" = 2, "RSV" = 2, "COVID-19" = 2))
 
 save_kable(tbl1_kbl, file = "figures/table1-overall.html", self_contained = TRUE)
 tbl1_kbl

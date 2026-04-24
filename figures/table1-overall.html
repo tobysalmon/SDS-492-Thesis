@@ -281,25 +281,22 @@ border: 0;
 </head>
 <body>
 <table class="table table-striped table-condensed" style="font-size: 12px; width: auto !important; margin-left: auto; margin-right: auto;">
-<caption style="font-size: initial !important;">Table 1: Nowcast performance at horizon 0 (100-week rolling-origin backtest). CRPS is sample-based from full posterior draws. CRPSS = 1 - CRPS/CRPS\_base (vs. family baseline; higher is better). Bold = best per column.</caption>
+<caption style="font-size: initial !important;">Table 1: Nowcast performance at horizon 0 (100-week rolling-origin backtest) Evaluated with Mean CRPS and Mean CRPSS values . Bold = best per column.</caption>
  <thead>
 <tr>
 <th style="empty-cells: hide;border-bottom:hidden;" colspan="1"></th>
-<th style="border-bottom:hidden;padding-bottom:0; padding-left:3px;padding-right:3px;text-align: center; " colspan="3"><div style="border-bottom: 1px solid #ddd; padding-bottom: 5px; ">Influenza</div></th>
-<th style="border-bottom:hidden;padding-bottom:0; padding-left:3px;padding-right:3px;text-align: center; " colspan="3"><div style="border-bottom: 1px solid #ddd; padding-bottom: 5px; ">RSV</div></th>
-<th style="border-bottom:hidden;padding-bottom:0; padding-left:3px;padding-right:3px;text-align: center; " colspan="3"><div style="border-bottom: 1px solid #ddd; padding-bottom: 5px; ">COVID-19</div></th>
+<th style="border-bottom:hidden;padding-bottom:0; padding-left:3px;padding-right:3px;text-align: center; " colspan="2"><div style="border-bottom: 1px solid #ddd; padding-bottom: 5px; ">Influenza</div></th>
+<th style="border-bottom:hidden;padding-bottom:0; padding-left:3px;padding-right:3px;text-align: center; " colspan="2"><div style="border-bottom: 1px solid #ddd; padding-bottom: 5px; ">RSV</div></th>
+<th style="border-bottom:hidden;padding-bottom:0; padding-left:3px;padding-right:3px;text-align: center; " colspan="2"><div style="border-bottom: 1px solid #ddd; padding-bottom: 5px; ">COVID-19</div></th>
 </tr>
   <tr>
    <th style="text-align:left;"> model </th>
    <th style="text-align:right;"> Influenza_CRPS </th>
    <th style="text-align:right;"> Influenza_CRPSS </th>
-   <th style="text-align:right;"> Influenza_95% Cov </th>
    <th style="text-align:right;"> RSV_CRPS </th>
    <th style="text-align:right;"> RSV_CRPSS </th>
-   <th style="text-align:right;"> RSV_95% Cov </th>
    <th style="text-align:right;"> COVID-19_CRPS </th>
    <th style="text-align:right;"> COVID-19_CRPSS </th>
-   <th style="text-align:right;"> COVID-19_95% Cov </th>
   </tr>
  </thead>
 <tbody>
@@ -307,97 +304,73 @@ border: 0;
    <td style="text-align:left;"> Base + Kinsa </td>
    <td style="text-align:right;"> 118.3 </td>
    <td style="text-align:right;"> 0 </td>
-   <td style="text-align:right;"> 98 </td>
    <td style="text-align:right;"> 35.2 </td>
    <td style="text-align:right;"> 0 </td>
-   <td style="text-align:right;"> <span style=" font-weight: bold;    ">95</span> </td>
    <td style="text-align:right;"> 69.7 </td>
    <td style="text-align:right;"> 0 </td>
-   <td style="text-align:right;"> 99 </td>
   </tr>
   <tr>
    <td style="text-align:left;"> M1 (Diseases → Kinsa) </td>
    <td style="text-align:right;"> 104.6 </td>
    <td style="text-align:right;"> -0.008 </td>
-   <td style="text-align:right;"> 97 </td>
    <td style="text-align:right;"> 34.5 </td>
    <td style="text-align:right;"> 0.012 </td>
-   <td style="text-align:right;"> 96 </td>
    <td style="text-align:right;"> <span style=" font-weight: bold;    ">61.6</span> </td>
    <td style="text-align:right;"> <span style=" font-weight: bold;    ">0.068</span> </td>
-   <td style="text-align:right;"> 99 </td>
   </tr>
   <tr>
    <td style="text-align:left;"> M2 (Kinsa → Diseases) </td>
    <td style="text-align:right;"> 109.7 </td>
    <td style="text-align:right;"> -0.039 </td>
-   <td style="text-align:right;"> 97 </td>
    <td style="text-align:right;"> 35.2 </td>
    <td style="text-align:right;"> -0.01 </td>
-   <td style="text-align:right;"> 96 </td>
    <td style="text-align:right;"> 61.7 </td>
    <td style="text-align:right;"> 0.06 </td>
-   <td style="text-align:right;"> 99 </td>
   </tr>
   <tr>
    <td style="text-align:left;"> M3 MVN + Kinsa </td>
    <td style="text-align:right;"> <span style=" font-weight: bold;    ">91.3</span> </td>
    <td style="text-align:right;"> <span style=" font-weight: bold;    ">0.203</span> </td>
-   <td style="text-align:right;"> 97 </td>
    <td style="text-align:right;"> <span style=" font-weight: bold;    ">32.3</span> </td>
    <td style="text-align:right;"> 0.032 </td>
-   <td style="text-align:right;"> 96 </td>
    <td style="text-align:right;"> 67.2 </td>
    <td style="text-align:right;"> -0.03 </td>
-   <td style="text-align:right;"> 100 </td>
   </tr>
   <tr>
    <td style="text-align:left;"> Base + ILI </td>
    <td style="text-align:right;"> 117.5 </td>
    <td style="text-align:right;"> 0 </td>
-   <td style="text-align:right;"> 98 </td>
    <td style="text-align:right;"> 35.3 </td>
    <td style="text-align:right;"> 0 </td>
-   <td style="text-align:right;"> 96 </td>
    <td style="text-align:right;"> 69.6 </td>
    <td style="text-align:right;"> 0 </td>
-   <td style="text-align:right;"> 99 </td>
   </tr>
   <tr>
    <td style="text-align:left;"> M1 (Diseases → ILI) </td>
    <td style="text-align:right;"> 174.2 </td>
    <td style="text-align:right;"> -0.251 </td>
-   <td style="text-align:right;"> 93 </td>
    <td style="text-align:right;"> 39.5 </td>
    <td style="text-align:right;"> 0.004 </td>
-   <td style="text-align:right;"> 95 </td>
    <td style="text-align:right;"> 68.6 </td>
    <td style="text-align:right;"> 0.007 </td>
-   <td style="text-align:right;"> 100 </td>
   </tr>
   <tr>
    <td style="text-align:left;"> M2 (ILI → Diseases) </td>
    <td style="text-align:right;"> 172.5 </td>
    <td style="text-align:right;"> -0.143 </td>
-   <td style="text-align:right;"> <span style=" font-weight: bold;    ">94</span> </td>
    <td style="text-align:right;"> 41.8 </td>
    <td style="text-align:right;"> -0.055 </td>
-   <td style="text-align:right;"> 95 </td>
    <td style="text-align:right;"> 68 </td>
    <td style="text-align:right;"> 0.013 </td>
-   <td style="text-align:right;"> 100 </td>
   </tr>
   <tr>
    <td style="text-align:left;"> M3 MVN + ILI </td>
    <td style="text-align:right;"> 102.2 </td>
    <td style="text-align:right;"> 0.172 </td>
-   <td style="text-align:right;"> 96 </td>
    <td style="text-align:right;"> 33.5 </td>
    <td style="text-align:right;"> <span style=" font-weight: bold;    ">0.043</span> </td>
-   <td style="text-align:right;"> 95 </td>
    <td style="text-align:right;"> 73.4 </td>
    <td style="text-align:right;"> -0.093 </td>
-   <td style="text-align:right;"> <span style=" font-weight: bold;    ">98</span> </td>
   </tr>
 </tbody>
 </table>
